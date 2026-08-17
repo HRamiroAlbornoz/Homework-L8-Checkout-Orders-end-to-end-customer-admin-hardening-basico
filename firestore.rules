@@ -90,103 +90,136 @@ service cloud.firestore {
     // -----------------------------------------------------------------------
 
     match /orders/{orderId} {
-      // Cada usuario ve solo sus propias órdenes. "resource" es el documento
-      // que YA está en la base (a diferencia de "request.resource", que es el
-      // que se intenta escribir).
-      allow read: if isSignedIn() && resource.data.userId == request.auth.uid;
-
-      // El documento de la orden guarda MUY POCO a propósito: quién compró, en
-      // qué estado está y cuándo. Ni los ítems ni los totales.
+      // -------------------------------------------------------------------
+      // LECTURA: el dueño de la orden, o cualquier administrador
+      // -------------------------------------------------------------------
       //
-      // Los totales no están porque estas reglas no podrían verificarlos: el
-      // lenguaje no permite recorrer un array ni sumar sus elementos. Un total
-      // guardado sería un número venido del navegador que nadie contrasta contra
-      // nada — y era exactamente lo que permitía comprar a cualquier precio
-      // editando el localStorage. Se calculan al leer, a partir de los ítems de
-      // la subcolección, que sí se verifican uno por uno (ver más abajo).
+      // "resource" es el documento que YA está en la base (a diferencia de
+      // "request.resource", que es el que se intenta escribir).
+      //
+      // ⚠ EL ORDEN DE LAS CONDICIONES IMPORTA, Y CUESTA DINERO.
+      //
+      // La comparación del userId va PRIMERO y isAdmin() al final, a propósito.
+      // isAdmin() hace un get() sobre users/{uid}, y cada get() dentro de una
+      // regla es una LECTURA FACTURABLE. Estas expresiones cortocircuitan: si el
+      // primer término del || ya es verdadero, el segundo no se evalúa.
+      //
+      // Con este orden, un cliente que lista sus 20 órdenes no dispara ningún
+      // get(). Con el orden invertido, pagaría una lectura extra por cada
+      // documento del listado sin obtener nada a cambio.
+      //
+      // Para una consulta de listado, Firestore evalúa esta regla contra cada
+      // documento devuelto: si alguno falla, falla la consulta entera. Por eso
+      // un cliente SOLO puede listar con where('userId','==',su uid), mientras
+      // que un admin puede listar sin filtro (isAdmin() no depende del
+      // documento, así que se cumple para todos).
+      allow read: if isSignedIn()
+                  && (resource.data.userId == request.auth.uid || isAdmin());
+
+      // -------------------------------------------------------------------
+      // CREACIÓN: solo el propio usuario, y siempre en estado inicial
+      // -------------------------------------------------------------------
       allow create: if isSignedIn()
                     // hasOnly rechaza cualquier campo que no esté en la lista.
                     // Sin esto, alguien podría llamar al SDK desde la consola
                     // del navegador e inyectar campos que la app no espera (un
-                    // "paid: true", o un blob de un megabyte).
-                    && request.resource.data.keys().hasOnly(['userId', 'status', 'createdAt'])
+                    // "descuento: 100", o un blob de un megabyte).
+                    // updatedAt NO está en la lista: una orden recién creada
+                    // nunca fue actualizada.
+                    && request.resource.data.keys().hasOnly(
+                         ['userId', 'items', 'total', 'status', 'createdAt']
+                       )
                     // Nadie puede crear una orden a nombre de otro usuario.
                     && request.resource.data.userId == request.auth.uid
-                    // El estado inicial siempre es 'created': así nadie puede
-                    // insertar directamente una orden ya marcada como pagada.
-                    && request.resource.data.status == 'created'
+                    // El estado inicial siempre es 'pending': así nadie puede
+                    // insertar una orden ya marcada como completada.
+                    && request.resource.data.status == 'pending'
                     // Patrón oficial de Firebase para confirmar que el campo se
                     // escribió con serverTimestamp() real, y no con una fecha
-                    // armada a mano del lado del cliente.
-                    && request.resource.data.createdAt == request.time;
+                    // armada a mano del lado del cliente. Es lo que garantiza
+                    // que el orden cronológico del historial sea confiable.
+                    && request.resource.data.createdAt == request.time
+                    && isValidOrderShape(request.resource.data);
 
-      // Una orden es un registro histórico: no se edita ni se borra. Un cambio
-      // de estado (a 'paid' o 'cancelled') lo haría un proceso del servidor con
-      // el SDK de Admin, que no pasa por estas reglas.
-      allow update, delete: if false;
+      // -------------------------------------------------------------------
+      // ACTUALIZACIÓN: solo un admin, solo el estado, y solo si la transición
+      // es válida
+      // -------------------------------------------------------------------
+      allow update: if isAdmin()
+                    // diff().affectedKeys() son los campos EFECTIVAMENTE
+                    // MODIFICADOS. Es la diferencia clave con
+                    // request.resource.data.keys(), que describe el documento
+                    // final completo: con keys() habría que listar todos los
+                    // campos de la orden y no se estaría restringiendo nada.
+                    //
+                    // Con hasOnly, cualquier intento de tocar total, userId,
+                    // items o createdAt —solo o junto con status— se rechaza.
+                    && request.resource.data.diff(resource.data)
+                         .affectedKeys().hasOnly(['status', 'updatedAt'])
+                    // El estado tiene que cambiar de verdad. Sin esto se podría
+                    // "actualizar" una orden sin modificarla, pisando updatedAt
+                    // con un cambio que nunca ocurrió.
+                    && request.resource.data.diff(resource.data)
+                         .affectedKeys().hasAny(['status'])
+                    // updatedAt es obligatorio y tiene que venir del servidor.
+                    // El enunciado lo da como opcional; acá se exige, porque una
+                    // orden que cambió de estado sin dejar constancia de cuándo
+                    // es un registro peor que inútil para auditar.
+                    && request.resource.data.updatedAt == request.time
+                    && isValidTransition(
+                         resource.data.status, request.resource.data.status
+                       );
 
-      // ---------------------------------------------------------------------
-      // Líneas de la orden
-      // ---------------------------------------------------------------------
-      //
-      // ACÁ ESTÁ LA VERIFICACIÓN DEL PRECIO, y es el motivo de que los ítems
-      // sean documentos separados en vez de un array dentro de la orden.
-      //
-      // Estas reglas no pueden recorrer un array, pero sí pueden leer otros
-      // documentos con get(). Al ser cada ítem un documento propio, cada uno
-      // tiene su propia evaluación de regla — y ahí sí se puede comparar su
-      // precio contra el del producto en el catálogo.
-      match /items/{itemId} {
-        allow read: if isSignedIn() && resource.data.userId == request.auth.uid;
-
-        allow create: if isSignedIn()
-                      // El userId viaja dentro del propio ítem en vez de leerse
-                      // de la orden padre con get(). El motivo: la orden y sus
-                      // ítems se escriben en un mismo writeBatch, y las reglas
-                      // de un lote se evalúan contra el estado ANTERIOR. En ese
-                      // momento la orden todavía no existe, así que un get()
-                      // sobre ella fallaría siempre.
-                      && request.resource.data.userId == request.auth.uid
-                      && request.resource.data.keys().hasOnly([
-                           'userId', 'productId', 'name', 'unitPrice', 'quantity'
-                         ])
-                      && request.resource.data.productId is string
-                      && request.resource.data.name is string
-                      && request.resource.data.name.size() > 0
-                      && request.resource.data.name.size() <= 120
-                      && request.resource.data.quantity is int
-                      && request.resource.data.quantity > 0
-                      // Mismo tope que MAX_QUANTITY_PER_ITEM en
-                      // src/features/cart/cartConstants.ts. Está duplicado a
-                      // propósito: las reglas no pueden importar código de la
-                      // app, y este es el único lugar donde el límite se aplica
-                      // de verdad.
-                      && request.resource.data.quantity <= 99
-                      // LA LÍNEA QUE CIERRA EL AGUJERO: el precio guardado tiene
-                      // que ser EXACTAMENTE el que figura hoy en el catálogo.
-                      //
-                      // Si el producto no existe, get() falla y la regla deniega.
-                      // Si alguien editó el precio en su localStorage, la
-                      // comparación no da y la escritura se rechaza.
-                      //
-                      // Efecto secundario aceptado: si un admin cambia el precio
-                      // de un producto, los carritos que ya lo tenían dejan de
-                      // poder confirmarse. El checkout lo contempla con un
-                      // mensaje que invita a revisar el carrito.
-                      //
-                      // Costo: una lectura facturable por ítem, que se cobra
-                      // aunque la regla termine rechazando la escritura.
-                      && request.resource.data.unitPrice == precioDeCatalogo(request.resource.data.productId);
-
-        // Igual que la orden: las líneas de una compra no se editan ni se borran.
-        allow update, delete: if false;
-      }
+      // Una orden es un registro histórico: no se borra nunca. Si hiciera falta
+      // "deshacer" una compra, eso es una transición a 'cancelled', que deja
+      // rastro — no una eliminación, que lo borra.
+      allow delete: if false;
     }
 
-    // Precio actual de un producto del catálogo. Si el documento no existe,
-    // get() falla y la regla que la invoca deniega la operación.
-    function precioDeCatalogo(productId) {
-      return get(/databases/$(database)/documents/products/$(productId)).data.price;
+    // Forma mínima válida de una orden.
+    //
+    // ⚠ LO QUE ESTAS REGLAS **NO** PUEDEN VERIFICAR
+    //
+    // El lenguaje de las reglas no permite RECORRER un array: no hay bucles ni
+    // funciones tipo map/reduce. Por eso acá se valida que "items" sea una lista
+    // con una cantidad razonable de elementos, pero NO se puede comprobar la
+    // forma de cada ítem, ni contrastar su precio contra products, ni verificar
+    // que "total" sea la suma de las líneas.
+    //
+    // Es una consecuencia directa del modelo que pide el enunciado (ítems
+    // embebidos en la orden). El proyecto anterior guardaba cada ítem como un
+    // documento propio en una subcolección justamente para poder verificar su
+    // precio con un get() — cosa que acá deja de ser posible.
+    //
+    // El trade-off está documentado en docs/ai-notes.md y en src/types/order.ts.
+    function isValidOrderShape(data) {
+      return data.userId is string
+             && data.userId.size() > 0
+             && data.total is number
+             && data.total >= 0
+             && data.items is list
+             && data.items.size() > 0
+             // Mismo tope que MAX_ITEMS_PER_ORDER en src/types/order.ts. Está
+             // duplicado a propósito: las reglas no pueden importar código de la
+             // app, y este es el único lugar donde el límite se aplica de verdad.
+             && data.items.size() <= 50;
+    }
+
+    // Transiciones permitidas entre estados.
+    //
+    // Réplica exacta de src/features/orders/orderTransitions.ts. La duplicación
+    // es deliberada y necesaria: deshabilitar una opción en el <select> ayuda al
+    // usuario honesto, pero no detiene a nadie que llame al SDK desde la consola
+    // del navegador. Esta copia es la que se aplica de verdad.
+    //
+    // 'completed' y 'cancelled' son terminales: no aparecen como origen en
+    // ninguna rama, así que cualquier intento de salir de ellos devuelve false.
+    // Eso también impide "descancelar" una orden.
+    //
+    // SI SE CAMBIAN LAS TRANSICIONES EN EL CÓDIGO, HAY QUE CAMBIARLAS ACÁ.
+    function isValidTransition(current, next) {
+      return (current == 'pending' && next in ['processing', 'cancelled'])
+             || (current == 'processing' && next in ['completed', 'cancelled']);
     }
 
     // -----------------------------------------------------------------------
