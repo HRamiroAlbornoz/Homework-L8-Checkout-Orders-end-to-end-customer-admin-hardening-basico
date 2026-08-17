@@ -16,6 +16,20 @@
   --shadow-card: 0 8px 24px rgba(43, 43, 51, 0.08);
   --header-bg: rgba(255, 255, 255, 0.85);
 
+  /* Estados de una orden. Todos los pares texto/fondo se verificaron contra la
+     fórmula de contraste de WCAG 2.1: el más bajo da 6.86:1, muy por encima del
+     4.5:1 que exige el nivel AA para texto normal.
+     El color acompaña pero nunca comunica solo: el badge siempre lleva el
+     nombre del estado escrito (ver OrderStatusBadge.tsx). */
+  --status-pending-bg: #fff4e0;
+  --status-pending-text: #7a4a00;
+  --status-processing-bg: #e3f0ff;
+  --status-processing-text: #10437a;
+  --status-completed-bg: #e4f5e9;
+  --status-completed-text: #145c2e;
+  --status-cancelled-bg: #fdecec;
+  --status-cancelled-text: #7a1616;
+
   font: 16px/1.5 system-ui, "Segoe UI", Roboto, sans-serif;
   color-scheme: light dark;
   color: var(--text);
@@ -41,6 +55,17 @@
     --accent-soft: rgba(192, 132, 252, 0.14);
     --shadow-card: 0 8px 24px rgba(0, 0, 0, 0.35);
     --header-bg: rgba(31, 32, 40, 0.85);
+
+    /* Mismos estados, invertidos para fondo oscuro. También verificados: el par
+       más bajo da 8.25:1. */
+    --status-pending-bg: #3a2f1a;
+    --status-pending-text: #f5cf8a;
+    --status-processing-bg: #1c2f45;
+    --status-processing-text: #a8cdf5;
+    --status-completed-bg: #1c3a28;
+    --status-completed-text: #a3e0bb;
+    --status-cancelled-bg: #3a1f1f;
+    --status-cancelled-text: #f3b4b4;
   }
 }
 
@@ -1162,4 +1187,220 @@ h1 {
   min-height: 44px;
   color: var(--accent);
   font-weight: 600;
+}
+
+/* ==========================================================================
+   ÓRDENES — badge de estado, historial del customer y detalle
+   ========================================================================== */
+
+/* Etiqueta del estado. El color de fondo cambia según el estado, pero el texto
+   siempre está: quien no distinga los colores lee igual "Cancelada". */
+.order-status {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 600;
+  /* Sin esto, un badge dentro de un enlace hereda el subrayado del enlace y
+     parece clickeable por su cuenta. */
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.order-status--pending {
+  background: var(--status-pending-bg);
+  color: var(--status-pending-text);
+}
+
+.order-status--processing {
+  background: var(--status-processing-bg);
+  color: var(--status-processing-text);
+}
+
+.order-status--completed {
+  background: var(--status-completed-bg);
+  color: var(--status-completed-text);
+}
+
+.order-status--cancelled {
+  background: var(--status-cancelled-bg);
+  color: var(--status-cancelled-text);
+}
+
+/* --------------------------------------------------------------------------
+   Historial del customer
+   -------------------------------------------------------------------------- */
+
+.orders-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* La tarjeta entera es el enlace: el área clickeable es toda la fila, no un
+   "ver más" chiquito al final. Es más fácil de acertar con el dedo y cumple de
+   sobra el mínimo de 44px de área táctil. */
+.orders-list__link {
+  display: grid;
+  /* Móvil primero: una sola columna, cada dato en su renglón. */
+  grid-template-columns: 1fr;
+  gap: 8px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: inherit;
+  text-decoration: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.orders-list__link:hover {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-card);
+}
+
+.orders-list__id {
+  font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
+  font-size: 14px;
+  color: var(--text-muted);
+  /* El id es largo y no tiene espacios: sin esto desborda la tarjeta en móvil. */
+  overflow-wrap: anywhere;
+}
+
+.orders-list__date,
+.orders-list__units {
+  font-size: 14px;
+  color: var(--text-muted);
+}
+
+.orders-list__total {
+  font-size: 18px;
+  color: var(--text-h);
+}
+
+/* A partir de tablet, la fila se acomoda en columnas. El badge y el total
+   quedan alineados entre tarjetas, que es lo que permite comparar de un vistazo. */
+@media (min-width: 768px) {
+  .orders-list__link {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    align-items: center;
+    column-gap: 20px;
+  }
+
+  .orders-list__id {
+    grid-column: 1;
+  }
+
+  .orders-list__date {
+    grid-column: 1;
+  }
+
+  .orders-list__units {
+    grid-column: 2;
+    text-align: right;
+  }
+
+  .orders-list__total {
+    grid-column: 3;
+    text-align: right;
+    min-width: 120px;
+  }
+
+  .order-status {
+    grid-column: 2 / 4;
+    justify-self: end;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Detalle de la orden
+   -------------------------------------------------------------------------- */
+
+.order-detail__id {
+  font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
+  font-size: 14px;
+  color: var(--text-muted);
+  margin: 0 0 20px;
+  overflow-wrap: anywhere;
+}
+
+.order-detail__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px 32px;
+  margin: 0 0 24px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.order-detail__field dt {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+
+.order-detail__field dd {
+  margin: 0;
+  font-weight: 600;
+}
+
+.order-detail__items {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 24px;
+}
+
+.order-detail__items th,
+.order-detail__items td {
+  padding: 12px 8px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+
+.order-detail__items thead th {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+/* Las tres columnas numéricas van a la derecha: alineados por la unidad, los
+   importes se comparan de un vistazo. */
+.order-detail__items th:not(:first-child),
+.order-detail__items td:not(:first-child) {
+  text-align: right;
+}
+
+.order-detail__items tfoot th,
+.order-detail__items tfoot td {
+  border-bottom: none;
+  padding-top: 16px;
+  font-size: 18px;
+  color: var(--text-h);
+}
+
+.order-detail__back-link,
+.checkout__detail-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* Si el sistema pide menos movimiento, se apagan las transiciones. No es una
+   preferencia estética: para algunas personas el movimiento en pantalla provoca
+   mareo o malestar real. */
+@media (prefers-reduced-motion: reduce) {
+  .orders-list__link {
+    transition: none;
+  }
 }

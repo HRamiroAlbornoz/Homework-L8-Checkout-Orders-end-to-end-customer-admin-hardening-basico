@@ -26,6 +26,12 @@ const CheckoutPage = lazy(() =>
 const AdminPage = lazy(() =>
   import("./pages/AdminPage").then((module) => ({ default: module.AdminPage })),
 );
+const OrdersPage = lazy(() =>
+  import("./pages/OrdersPage").then((module) => ({ default: module.OrdersPage })),
+);
+const OrderDetailPage = lazy(() =>
+  import("./pages/OrderDetailPage").then((module) => ({ default: module.OrderDetailPage })),
+);
 
 function App() {
   return (
@@ -62,6 +68,31 @@ function App() {
             element={
               <Suspense fallback={<LoadingState message="Cargando página..." />}>
                 <CheckoutPage />
+              </Suspense>
+            }
+          />
+
+          {/* El historial de compras es privado por definición: solo tiene
+              sentido con sesión iniciada, y las reglas de Firestore además
+              impiden leer órdenes ajenas. El guard acá es UX (evita una
+              pantalla de error); la protección real está en las reglas. */}
+          <Route
+            path="orders"
+            element={
+              <Suspense fallback={<LoadingState message="Cargando página..." />}>
+                <OrdersPage />
+              </Suspense>
+            }
+          />
+
+          {/* El segmento ":orderId" tiene que llamarse igual que la clave que
+              OrderDetailPage lee con useParams. Si no coinciden, la página
+              recibe undefined y muestra "no encontrada" sin ninguna pista. */}
+          <Route
+            path="orders/:orderId"
+            element={
+              <Suspense fallback={<LoadingState message="Cargando página..." />}>
+                <OrderDetailPage />
               </Suspense>
             }
           />

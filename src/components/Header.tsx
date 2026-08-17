@@ -41,6 +41,12 @@ export function Header() {
 
           {user ? (
             <>
+              {/* Disponible para cualquier usuario con sesión: el historial es
+                  de todos, no solo de los administradores. */}
+              <Link to="/orders" className="site-header__link">
+                Mis órdenes
+              </Link>
+
               {user.role === "admin" && (
                 <Link to="/admin" className="site-header__link">
                   Panel de administración

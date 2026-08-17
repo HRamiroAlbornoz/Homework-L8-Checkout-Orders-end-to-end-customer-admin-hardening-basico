@@ -95,9 +95,22 @@ export function CheckoutPage() {
         <p className="checkout__confirmation" role="status">
           Tu orden <strong>{orderId}</strong> fue registrada correctamente.
         </p>
-        <Link to="/" className="checkout__back-link">
-          Volver al catálogo
-        </Link>
+
+        {/*
+          El detalle de la orden es la vista PERMANENTE de esta compra: esta
+          pantalla de confirmación se pierde apenas la persona navegue a otro
+          lado. Ofrecer el enlace acá evita que tenga que buscarla después en el
+          historial, y de paso le muestra dónde va a quedar guardada.
+        */}
+        <div className="checkout__actions">
+          <Link to={`/orders/${orderId}`} className="checkout__detail-link">
+            Ver el detalle de la orden
+          </Link>
+
+          <Link to="/" className="checkout__back-link">
+            Volver al catálogo
+          </Link>
+        </div>
       </div>
     );
   }
