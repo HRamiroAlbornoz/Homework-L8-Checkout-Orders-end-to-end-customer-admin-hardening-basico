@@ -6,7 +6,7 @@ import { useCart } from "../features/cart/useCart";
 import { useDocumentTitle } from "../hooks/useDocumentTitle";
 import { formatPrice } from "../lib/formatPrice";
 import { mapOrderError, type OrderError } from "../lib/orderErrors";
-import { createOrderFromCart } from "../services/ordersService";
+import { createOrderFromCart, createOrderId } from "../services/ordersService";
 
 export function CheckoutPage() {
   // Un solo título para las tres pantallas de esta página (compra pendiente,
@@ -32,6 +32,19 @@ export function CheckoutPage() {
   // que el código DECIDE.
   const isSubmittingRef = useRef(false);
 
+  // Id de la orden, generado ANTES de escribir y conservado entre reintentos.
+  //
+  // Acá está la idempotencia mínima que pide el enunciado. Si el primer intento
+  // falla (se cortó la red, por ejemplo) y la persona vuelve a apretar
+  // "Confirmar compra", se escribe sobre ESTE MISMO id en vez de crear una orden
+  // nueva. Sin esto, cada reintento dejaría una orden más en la base, y el
+  // usuario terminaría con tres compras registradas por haber insistido.
+  //
+  // Va en un ref y no en un estado porque no se muestra en pantalla: cambiarlo
+  // no tiene por qué provocar un re-render. Y sobrevive a los renders, que es
+  // justamente lo que una variable común dentro del componente no haría.
+  const pendingOrderIdRef = useRef<string | null>(null);
+
   async function handleConfirmPurchase(): Promise<void> {
     if (isSubmittingRef.current) {
       return;
@@ -41,18 +54,28 @@ export function CheckoutPage() {
     setError(null);
     setIsSubmitting(true);
 
+    // ??= asigna solo si todavía es null. En el primer intento genera el id; en
+    // los reintentos deja el que ya había. Generarlo acá y no al montar la
+    // página evita reservar un id para alguien que quizás nunca compre.
+    pendingOrderIdRef.current ??= createOrderId();
+
     try {
-      const createdOrderId = await createOrderFromCart(user?.uid ?? "", {
-        items,
-        totalItems,
-        totalPrice,
-      });
+      const createdOrderId = await createOrderFromCart(
+        user?.uid ?? "",
+        { items, totalItems, totalPrice },
+        pendingOrderIdRef.current,
+      );
 
       // Los efectos del éxito van DENTRO del try y DESPUÉS del await exitoso.
       // Si estuvieran en el finally, se ejecutarían también cuando la creación
       // falla: se vaciaría el carrito de alguien cuya compra nunca se registró.
       clearCart();
       setOrderId(createdOrderId);
+
+      // El id se libera recién con la compra confirmada. Si la persona vuelve a
+      // comprar más tarde, esa es una orden nueva y necesita un id nuevo:
+      // reutilizar este pisaría la compra anterior.
+      pendingOrderIdRef.current = null;
     } catch (caughtError) {
       setError(mapOrderError(caughtError));
     } finally {

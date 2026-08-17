@@ -20,6 +20,7 @@ import { OrderError } from "../lib/orderErrors";
 // createOrderFromCart es la única puerta hacia Firestore, y está tapada.
 vi.mock("../services/ordersService", () => ({
   createOrderFromCart: vi.fn(),
+  createOrderId: vi.fn(),
 }));
 
 vi.mock("../contexts/AuthContext", () => ({
@@ -27,7 +28,7 @@ vi.mock("../contexts/AuthContext", () => ({
 }));
 
 import { useAuth } from "../contexts/AuthContext";
-import { createOrderFromCart } from "../services/ordersService";
+import { createOrderFromCart, createOrderId } from "../services/ordersService";
 import { CheckoutPage } from "./CheckoutPage";
 
 const CUSTOMER_UID = "uid-customer";
@@ -69,6 +70,15 @@ function getConfirmButton(): HTMLElement {
 beforeEach(() => {
   window.localStorage.clear();
   mockLoggedInUser();
+
+  // Ids predecibles y distintos entre sí: así los tests pueden afirmar tanto
+  // que un reintento REUSA el id como que una compra nueva pide uno nuevo.
+  // Con un valor fijo, el primer caso pasaría sin probar nada.
+  let idsGenerados = 0;
+  vi.mocked(createOrderId).mockImplementation(() => {
+    idsGenerados += 1;
+    return `orden-generada-${idsGenerados}`;
+  });
 });
 
 afterEach(() => {
@@ -83,11 +93,17 @@ describe("CheckoutPage — compra exitosa", () => {
 
     await user.click(getConfirmButton());
 
-    expect(createOrderFromCart).toHaveBeenCalledWith(CUSTOMER_UID, {
-      items: cartWithTwoProducts.items,
-      totalItems: 3,
-      totalPrice: 250,
-    });
+    expect(createOrderFromCart).toHaveBeenCalledWith(
+      CUSTOMER_UID,
+      {
+        items: cartWithTwoProducts.items,
+        totalItems: 3,
+        totalPrice: 250,
+      },
+      // El tercer argumento es el id pre-generado: la página lo decide antes de
+      // escribir, no lo recibe del servidor.
+      "orden-generada-1",
+    );
   });
 
   it("muestra la confirmación con el número de orden", async () => {
@@ -238,6 +254,45 @@ describe("CheckoutPage — protección contra doble envío", () => {
     await act(async () => {
       resolveOrder("orden-789");
     });
+  });
+});
+
+describe("CheckoutPage — idempotencia del reintento", () => {
+  it("reintentar después de un error escribe sobre el MISMO id", async () => {
+    const user = userEvent.setup();
+    vi.mocked(createOrderFromCart)
+      .mockRejectedValueOnce(new OrderError(ORDER_ERROR_CODES.NETWORK_ERROR, "Se cortó la red.", { retryable: true }))
+      .mockResolvedValueOnce("orden-generada-1");
+    renderCheckout();
+
+    await user.click(getConfirmButton());
+    await screen.findByRole("alert");
+
+    await user.click(getConfirmButton());
+    await screen.findByText(/gracias por tu compra/i);
+
+    const idsUsados = vi.mocked(createOrderFromCart).mock.calls.map((llamada) => llamada[2]);
+
+    // Este es el corazón de la idempotencia. Si la página generara un id nuevo
+    // en cada intento, acá habría dos valores distintos — y en Firestore, dos
+    // órdenes por una sola compra.
+    expect(idsUsados).toEqual(["orden-generada-1", "orden-generada-1"]);
+  });
+
+  it("el id se genera una sola vez, por más veces que se reintente", async () => {
+    const user = userEvent.setup();
+    vi.mocked(createOrderFromCart).mockRejectedValue(
+      new OrderError(ORDER_ERROR_CODES.UNKNOWN_ERROR, "Algo salió mal."),
+    );
+    renderCheckout();
+
+    await user.click(getConfirmButton());
+    await screen.findByRole("alert");
+    await user.click(getConfirmButton());
+    await user.click(getConfirmButton());
+
+    expect(createOrderId).toHaveBeenCalledTimes(1);
+    expect(createOrderFromCart).toHaveBeenCalledTimes(3);
   });
 });
 
