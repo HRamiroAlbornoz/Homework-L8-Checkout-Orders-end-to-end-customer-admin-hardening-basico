@@ -4,16 +4,11 @@ import { EmptyState } from "../components/states/EmptyState";
 import { ErrorState } from "../components/states/ErrorState";
 import { LoadingState } from "../components/states/LoadingState";
 import { useAuth } from "../contexts/AuthContext";
+import { countOrderUnits } from "../features/orders/orderSummary";
 import { useCustomerOrders } from "../features/orders/useCustomerOrders";
 import { useDocumentTitle } from "../hooks/useDocumentTitle";
 import { formatDateTime } from "../lib/formatDate";
 import { formatPrice } from "../lib/formatPrice";
-import type { Order } from "../types/order";
-
-/** Cuántas unidades tiene la orden en total, sumando las cantidades de cada línea. */
-function countUnits(order: Order): number {
-  return order.items.reduce((total, item) => total + item.quantity, 0);
-}
 
 export function OrdersPage() {
   // Antes de cualquier return temprano: los hooks tienen que ejecutarse siempre,
@@ -80,7 +75,7 @@ export function OrdersPage() {
               </time>
 
               <span className="orders-list__units">
-                {countUnits(order)} {countUnits(order) === 1 ? "unidad" : "unidades"}
+                {countOrderUnits(order)} {countOrderUnits(order) === 1 ? "unidad" : "unidades"}
               </span>
 
               <strong className="orders-list__total">{formatPrice(order.total)}</strong>

@@ -1,6 +1,7 @@
 import { lazy, Suspense } from "react";
 import { Route, Routes } from "react-router";
 import { RootLayout } from "./layouts/RootLayout";
+import { AdminLayout } from "./layouts/AdminLayout";
 import { ProductsProvider } from "./contexts/ProductsContext";
 import { ProductsPage } from "./pages/ProductsPage";
 import { LoginPage } from "./pages/LoginPage";
@@ -31,6 +32,9 @@ const OrdersPage = lazy(() =>
 );
 const OrderDetailPage = lazy(() =>
   import("./pages/OrderDetailPage").then((module) => ({ default: module.OrderDetailPage })),
+);
+const AdminOrdersPage = lazy(() =>
+  import("./pages/AdminOrdersPage").then((module) => ({ default: module.AdminOrdersPage })),
 );
 
 function App() {
@@ -98,15 +102,29 @@ function App() {
           />
         </Route>
 
+        {/* El guard se declara UNA sola vez, en el padre: cada sección nueva
+            del panel lo hereda sin tener que acordarse de repetirlo.
+            AdminLayout aporta el marco común (título y navegación) y delega el
+            contenido a la sección con <Outlet />. */}
         <Route element={<AdminRoute />}>
-          <Route
-            path="admin"
-            element={
-              <Suspense fallback={<LoadingState message="Cargando página..." />}>
-                <AdminPage />
-              </Suspense>
-            }
-          />
+          <Route path="admin" element={<AdminLayout />}>
+            <Route
+              index
+              element={
+                <Suspense fallback={<LoadingState message="Cargando página..." />}>
+                  <AdminPage />
+                </Suspense>
+              }
+            />
+            <Route
+              path="orders"
+              element={
+                <Suspense fallback={<LoadingState message="Cargando página..." />}>
+                  <AdminOrdersPage />
+                </Suspense>
+              }
+            />
+          </Route>
         </Route>
 
         <Route path="*" element={<NotFoundPage />} />

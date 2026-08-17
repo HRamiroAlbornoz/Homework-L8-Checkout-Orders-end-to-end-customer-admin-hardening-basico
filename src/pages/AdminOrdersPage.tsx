@@ -1,0 +1,289 @@
+import { useState } from "react";
+import { OrderStatusBadge } from "../components/orders/OrderStatusBadge";
+import { EmptyState } from "../components/states/EmptyState";
+import { ErrorState } from "../components/states/ErrorState";
+import { LoadingState } from "../components/states/LoadingState";
+import { countOrderUnits } from "../features/orders/orderSummary";
+import { ORDER_STATUS_LABELS } from "../features/orders/orderStatusLabels";
+import { getAllowedTransitions } from "../features/orders/orderTransitions";
+import { useAdminOrders } from "../features/orders/useAdminOrders";
+import { useDocumentTitle } from "../hooks/useDocumentTitle";
+import { formatDateTime } from "../lib/formatDate";
+import { formatPrice } from "../lib/formatPrice";
+import { updateOrderStatus } from "../services/ordersService";
+import { orderStatusSchema, type Order, type OrderStatus } from "../types/order";
+
+/** Cambio de estado esperando confirmación. */
+interface PendingChange {
+  order: Order;
+  nextStatus: OrderStatus;
+}
+
+export function AdminOrdersPage() {
+  useDocumentTitle("Órdenes · Panel de administración");
+
+  // null significa "todos los estados". Se distingue del undefined a propósito:
+  // "sin filtro" es una elección, no un dato que falta.
+  const [statusFilter, setStatusFilter] = useState<OrderStatus | null>(null);
+
+  const orders = useAdminOrders(statusFilter);
+
+  const [pendingChange, setPendingChange] = useState<PendingChange | null>(null);
+
+  // Estado POR ÍTEM, no un booleano global. Con un flag compartido, cambiar una
+  // fila deshabilitaría toda la tabla y no se vería cuál se está procesando.
+  const [updatingOrderId, setUpdatingOrderId] = useState<string | null>(null);
+
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  function handleFilterChange(value: string): void {
+    if (value === "") {
+      setStatusFilter(null);
+      return;
+    }
+
+    // safeParse en vez de una aserción de tipo: el valor sale del DOM, que es
+    // un dato externo. Si alguien edita el <option> desde las devtools, acá se
+    // descarta en vez de viajar como un estado inválido hasta Firestore.
+    const parsed = orderStatusSchema.safeParse(value);
+
+    if (parsed.success) {
+      setStatusFilter(parsed.data);
+    }
+  }
+
+  function handleSelectNextStatus(order: Order, value: string): void {
+    const parsed = orderStatusSchema.safeParse(value);
+
+    if (parsed.success) {
+      setActionError(null);
+      setPendingChange({ order, nextStatus: parsed.data });
+    }
+  }
+
+  async function handleConfirmChange(): Promise<void> {
+    if (!pendingChange) {
+      return;
+    }
+
+    const { order, nextStatus } = pendingChange;
+
+    setActionError(null);
+    setUpdatingOrderId(order.id);
+
+    try {
+      await updateOrderStatus(order.id, nextStatus);
+
+      // Los efectos del éxito van DENTRO del try y después del await: si
+      // estuvieran en el finally, se cerraría la confirmación y se recargaría la
+      // lista incluso cuando la escritura falló.
+      setPendingChange(null);
+
+      // Se recarga desde Firestore en vez de actualizar la fila en memoria. Es
+      // una lectura más, pero garantiza que lo que se ve sea lo que quedó
+      // guardado — incluido el updatedAt que puso el servidor, que el cliente no
+      // conoce. Si hay un filtro activo, la orden puede desaparecer de la lista:
+      // es correcto, ya no pertenece al estado filtrado.
+      orders.reload();
+    } catch (error) {
+      setActionError(
+        error instanceof Error ? error.message : "No pudimos actualizar la orden.",
+      );
+    } finally {
+      setUpdatingOrderId(null);
+    }
+  }
+
+  function renderOrders() {
+    if (orders.status === "loading") {
+      return <LoadingState message="Cargando las órdenes..." />;
+    }
+
+    if (orders.status === "error") {
+      return (
+        <ErrorState
+          message={orders.error.message}
+          onRetry={orders.reload}
+          retryLabel="Reintentar la carga de las órdenes"
+        />
+      );
+    }
+
+    if (orders.data.length === 0) {
+      return (
+        <EmptyState
+          message={
+            statusFilter
+              ? `No hay órdenes en estado "${ORDER_STATUS_LABELS[statusFilter]}".`
+              : "Todavía no hay ninguna orden."
+          }
+        />
+      );
+    }
+
+    return (
+      // El contenedor con scroll horizontal evita que la tabla desborde la
+      // pantalla en un monitor angosto: se desplaza ella sola en vez de estirar
+      // la página entera.
+      <div className="admin-orders__table-wrapper">
+        <table className="admin-orders__table">
+          <caption className="visually-hidden">
+            Todas las órdenes, de la más reciente a la más antigua
+          </caption>
+          <thead>
+            <tr>
+              <th scope="col">Orden</th>
+              <th scope="col">Cliente</th>
+              <th scope="col">Fecha</th>
+              <th scope="col">Unidades</th>
+              <th scope="col">Total</th>
+              <th scope="col">Estado</th>
+              <th scope="col">Cambiar estado</th>
+            </tr>
+          </thead>
+          <tbody>
+            {orders.data.map((order) => {
+              const allowedTransitions = getAllowedTransitions(order.status);
+              const isUpdating = updatingOrderId === order.id;
+
+              return (
+                <tr key={order.id}>
+                  <td className="admin-orders__id">{order.id}</td>
+                  <td className="admin-orders__id">{order.userId}</td>
+                  <td>
+                    <time dateTime={order.createdAt.toISOString()}>
+                      {formatDateTime(order.createdAt)}
+                    </time>
+                  </td>
+                  <td>{countOrderUnits(order)}</td>
+                  <td>{formatPrice(order.total)}</td>
+                  <td>
+                    <OrderStatusBadge status={order.status} />
+                  </td>
+                  <td>
+                    {allowedTransitions.length === 0 ? (
+                      // Un estado terminal no ofrece ninguna acción. Se dice con
+                      // palabras en vez de dejar la celda vacía: una celda vacía
+                      // se lee como "falta algo", no como "no hay nada que hacer".
+                      <span className="admin-orders__no-actions">Estado final</span>
+                    ) : (
+                      <>
+                        {/*
+                          Cada <select> necesita su propio <label>. Se oculta a la
+                          vista porque el encabezado de la columna ya explica de
+                          qué se trata, pero un lector de pantalla que salta de
+                          control en control no pasa por el encabezado: sin label,
+                          anunciaría solo "lista desplegable".
+                        */}
+                        <label htmlFor={`status-${order.id}`} className="visually-hidden">
+                          Cambiar el estado de la orden {order.id}
+                        </label>
+                        <select
+                          id={`status-${order.id}`}
+                          // El valor vuelve siempre a "": el <select> acá es un
+                          // disparador de acción, no un campo que guarde un
+                          // valor. Dejarlo con la opción elegida sugeriría que el
+                          // cambio ya se aplicó, cuando todavía falta confirmar.
+                          value=""
+                          disabled={isUpdating}
+                          onChange={(event) => handleSelectNextStatus(order, event.target.value)}
+                        >
+                          <option value="">Cambiar a…</option>
+                          {/*
+                            Solo se ofrecen las transiciones válidas: desde
+                            "pending" no aparece "completed". Esto ayuda al
+                            usuario, pero NO es la barrera — las reglas de
+                            Firestore validan la misma máquina de estados.
+                          */}
+                          {allowedTransitions.map((nextStatus) => (
+                            <option key={nextStatus} value={nextStatus}>
+                              {ORDER_STATUS_LABELS[nextStatus]}
+                            </option>
+                          ))}
+                        </select>
+
+                        {isUpdating && (
+                          <span role="status" className="admin-orders__updating">
+                            Actualizando…
+                          </span>
+                        )}
+                      </>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    );
+  }
+
+  return (
+    <section className="admin-orders">
+      <h2>Órdenes</h2>
+
+      <div className="admin-orders__filter">
+        <label htmlFor="filtro-estado">Filtrar por estado</label>
+        <select
+          id="filtro-estado"
+          value={statusFilter ?? ""}
+          onChange={(event) => handleFilterChange(event.target.value)}
+        >
+          <option value="">Todos los estados</option>
+          {orderStatusSchema.options.map((status) => (
+            <option key={status} value={status}>
+              {ORDER_STATUS_LABELS[status]}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {/*
+        CONFIRMACIÓN ANTES DE CAMBIAR EL ESTADO.
+        En esta máquina de estados NINGUNA transición se puede deshacer: de
+        "processing" no se vuelve a "pending", y "completed" y "cancelled" son
+        terminales. Por eso se confirma siempre, y el mensaje dice exactamente
+        qué orden y qué cambio — un "¿estás seguro?" a secas obligaría a
+        recordar de memoria sobre cuál de las filas se hizo clic.
+      */}
+      {pendingChange && (
+        <div className="admin-orders__confirm" role="alertdialog" aria-live="assertive">
+          <p>
+            Vas a cambiar la orden <strong>{pendingChange.order.id}</strong> de{" "}
+            <strong>{ORDER_STATUS_LABELS[pendingChange.order.status]}</strong> a{" "}
+            <strong>{ORDER_STATUS_LABELS[pendingChange.nextStatus]}</strong>. Este cambio no se
+            puede deshacer.
+          </p>
+
+          <div className="admin-orders__confirm-actions">
+            <button
+              type="button"
+              className="admin-orders__confirm-yes"
+              onClick={handleConfirmChange}
+              disabled={updatingOrderId !== null}
+            >
+              {updatingOrderId !== null ? "Guardando…" : "Sí, cambiar el estado"}
+            </button>
+            <button
+              type="button"
+              className="admin-orders__confirm-no"
+              onClick={() => setPendingChange(null)}
+              disabled={updatingOrderId !== null}
+            >
+              Cancelar
+            </button>
+          </div>
+        </div>
+      )}
+
+      {actionError && (
+        <p className="admin-orders__error" role="alert">
+          {actionError}
+        </p>
+      )}
+
+      {renderOrders()}
+    </section>
+  );
+}
