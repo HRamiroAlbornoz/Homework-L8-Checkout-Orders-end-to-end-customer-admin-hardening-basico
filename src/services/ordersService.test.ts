@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { FirebaseError } from "firebase/app";
-import { makeCartItem } from "@/test/fixtures";
+import { makeCartItem, makeOrder } from "@/test/fixtures";
 import type { CartState } from "@/features/cart/types";
 import { MAX_ITEMS_PER_ORDER, type Order } from "@/types/order";
 
@@ -138,18 +138,6 @@ const carritoConDosProductos: CartState = {
   totalItems: 3,
   totalPrice: 250,
 };
-
-function makeOrder(overrides: Partial<Order> = {}): Order {
-  return {
-    id: "orden-1",
-    userId: "uid-1",
-    items: [{ productId: "p-1", name: "Nike Air Max 90", priceAtPurchase: 100, quantity: 2 }],
-    total: 200,
-    status: "pending",
-    createdAt: new Date("2026-01-15T10:00:00Z"),
-    ...overrides,
-  };
-}
 
 /** Devuelve la última llamada a setDoc() ya tipada. */
 function ultimaEscritura(): [DocumentoFalso, Record<string, unknown>] {
