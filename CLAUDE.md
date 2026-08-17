@@ -77,30 +77,43 @@ Estas dos capas son independientes a propósito: los guards son UX, las reglas s
 
 Un ítem del carrito guarda una **foto** del producto (`productId`, `name`, `unitPrice`), no una referencia viva. En este proyecto `price` es opcional dentro de `Product`, así que el problema "producto sin precio" se resuelve una sola vez, en la puerta de entrada (`AddToCartButton`), en vez de contaminar cada cálculo.
 
-### Órdenes: los ítems son documentos, no un array
-
-Una orden se guarda en dos niveles:
+### Órdenes: un solo documento con los ítems adentro
 
 ```
-orders/{orderId}                  → { userId, status, createdAt }
-orders/{orderId}/items/{itemId}   → { userId, productId, name, unitPrice, quantity }
+orders/{orderId} → { userId, items[], total, status, createdAt, updatedAt? }
 ```
 
-**No es una decisión organizativa, es de seguridad.** Con los ítems dentro de un array, el precio de cada uno venía del navegador y nada lo contrastaba con el catálogo: editando `localStorage` se podía comprar a cualquier precio. Las reglas no pueden recorrer un array ni sumar, pero **sí pueden leer otros documentos con `get()`** — y al ser cada ítem un documento propio, cada uno tiene su propia evaluación de regla:
+Cada ítem es una **foto** del producto (`productId`, `name`, `priceAtPurchase`, `quantity`). El historial **no** se rehidrata leyendo `products`: si el precio cambia o el producto se elimina, la orden tiene que seguir mostrando qué se compró y a cuánto.
 
-```
-request.resource.data.unitPrice == precioDeCatalogo(request.resource.data.productId)
-```
+**⚠ Este modelo reemplazó a uno más seguro, y hay que saberlo antes de tocarlo.**
 
-Tres consecuencias que hay que conocer antes de tocar esto:
+Hasta el L7, cada ítem era un documento propio en `orders/{id}/items/{itemId}`, y no era una decisión organizativa sino de seguridad: las reglas **no pueden recorrer un array**, pero **sí pueden leer otros documentos con `get()`**. Con un documento por ítem, cada uno tenía su propia evaluación de regla y se podía comparar su precio contra el catálogo, lo que impedía comprar más barato editando `localStorage`.
 
-- **Los totales no se guardan.** Se calculan al leer, desde ítems ya verificados. Un total guardado sería un dato que las reglas no pueden comprobar — exactamente el agujero que había.
-- **El `userId` se repite en cada ítem.** En un `writeBatch` las reglas se evalúan contra el estado *anterior* al lote, así que un `get()` sobre la orden padre fallaría: todavía no existe.
-- **Un cambio de precio invalida los carritos en curso.** Es el costo aceptado de verificar. `mapOrderError` traduce el `permission-denied` a un mensaje que invita a revisar el carrito, porque esa es hoy la causa más probable.
+El contrato del enunciado del L8 exige el modelo embebido, así que **esa verificación ya no es posible**. Las reglas validan forma, tipos, cantidad de ítems y rangos, pero no precios ni la suma del total.
 
-Al escribir se usa `writeBatch`: la orden y sus líneas entran juntas o no entra ninguna. Sin atomicidad, un rechazo a mitad de camino dejaría una orden sin ítems.
+Consecuencias que hay que conocer:
 
-**Para listar órdenes o ítems** hace falta incluir `where("userId", "==", uid)` en la consulta. Firestore **no filtra los resultados** según las reglas: evalúa la regla contra la consulta y la rechaza entera si no garantiza que todo lo devuelto cumple. Un listado sin ese filtro devuelve `403`.
+- **El total se recalcula en el service**, nunca se copia de `cart.totalPrice`. No cierra el agujero —los precios vienen del mismo lugar— pero evita guardar un total incoherente con las líneas de la propia orden. Hay un test que lo fuerza.
+- **`priceAtPurchase`, no `unitPrice`.** El carrito conserva `unitPrice`; el mapeo ocurre en el service, porque el significado cambia: en el carrito es el precio de hoy, en la orden es el de esa compra.
+- **Ya no se usa `writeBatch`.** Con un único documento, la escritura es atómica por definición.
+
+**Para listar órdenes** hace falta incluir `where("userId", "==", uid)` si no sos admin. Firestore **no filtra los resultados** según las reglas: evalúa la regla contra cada documento devuelto y rechaza la consulta entera si alguno no cumple.
+
+### Máquina de estados
+
+`pending → processing → completed`, con `cancelled` alcanzable desde los dos primeros. `completed` y `cancelled` son **terminales**: ninguna transición se puede deshacer.
+
+Está definida en `src/features/orders/orderTransitions.ts` y **replicada en `firestore.rules`**. La duplicación es deliberada —el `<select>` ayuda al usuario honesto, las reglas detienen al resto—, pero significa que **cambiar una obliga a cambiar la otra**. Ambos archivos lo señalan.
+
+### El orden de las condiciones en `allow read` cuesta dinero
+
+`isAdmin()` hace un `get()` sobre `users/{uid}`, y cada `get()` dentro de una regla es una **lectura facturable** que se cobra incluso cuando la regla rechaza. Las expresiones cortocircuitan, así que la comparación del dueño va **primero**: un cliente que lista sus órdenes no dispara ningún `get()`.
+
+### Idempotencia del checkout
+
+El `orderId` se genera con `createOrderId()` **antes** de escribir (`doc()` sobre una colección produce el id sin tocar la red) y se conserva en un `ref` mientras dura el intento, de modo que reintentar sobrescriba el mismo documento con `setDoc`. Con `addDoc` sería imposible: el id lo asigna la escritura.
+
+**El caso borde que hay que respetar al tocar esto:** si el primer intento sí escribió y solo se perdió la respuesta, el reintento es un `update` a los ojos de las reglas — y el cliente no puede actualizar. Por eso, ante un `permission-denied`, el service comprueba si el documento ya existe y es del usuario antes de dar el error por bueno.
 
 ### Doble envío: el estado es lo que se ve, el ref es lo que decide
 
@@ -124,7 +137,9 @@ El nombre del archivo se genera con `randomUUID()` y la extensión sale del `con
 
 `App.tsx` define las rutas sobre `RootLayout` (Header + `<Outlet />` compartidos); `ProductsProvider` envuelve solo la ruta `/` porque el catálogo de productos no lo necesita el resto de la app.
 
-**`/cart` es pública a propósito**: un visitante arma su carrito antes de registrarse (vive en `localStorage`) y la sesión recién se exige al pagar. `/checkout` está bajo `ProtectedRoute` y `/admin` bajo `AdminRoute`.
+**`/cart` es pública a propósito**: un visitante arma su carrito antes de registrarse (vive en `localStorage`) y la sesión recién se exige al pagar. `/checkout`, `/orders` y `/orders/:orderId` están bajo `ProtectedRoute`.
+
+**El panel de administración usa una ruta-layout.** `/admin` (productos) y `/admin/orders` cuelgan de un `<Route path="admin" element={<AdminLayout />}>` que a su vez está dentro de `AdminRoute`. El guard se declara **una sola vez**: cada sección nueva del panel lo hereda sin tener que acordarse de repetirlo, que es exactamente la forma en que un día una se olvida. `AdminLayout` aporta el `<h1>` y la navegación entre secciones, así que las páginas hijas empiezan en `<h2>`.
 
 ### El título de la pestaña lo pone cada página
 
