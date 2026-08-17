@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { MAX_QUANTITY_PER_ITEM } from "./cartConstants";
 
 // Un ítem del carrito guarda una FOTO del producto, no una referencia viva a él.
 //
@@ -17,7 +18,16 @@ export const cartItemSchema = z.object({
   productId: z.string().min(1),
   name: z.string().min(1),
   unitPrice: z.number().nonnegative(),
-  quantity: z.number().int().positive(),
+  // El tope es el mismo que aplica el reducer al sumar unidades. Estaba solo
+  // ahí, y por eso un carrito manipulado a mano en localStorage podía tener
+  // cualquier cantidad: el reducer nunca la había producido, así que nunca la
+  // limitó. Ese carrito llegaba hasta el checkout y recién fallaba al validar
+  // la orden, con un error que no explicaba nada.
+  //
+  // Declarándolo acá, cartStorage lo rechaza al leer (usa safeParse y vuelve a
+  // un carrito vacío), que es donde corresponde detectar un dato externo
+  // inválido: en la puerta de entrada, no tres pantallas más adelante.
+  quantity: z.number().int().positive().max(MAX_QUANTITY_PER_ITEM),
 });
 
 export type CartItem = z.infer<typeof cartItemSchema>;

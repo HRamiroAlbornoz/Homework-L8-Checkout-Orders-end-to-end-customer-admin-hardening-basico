@@ -6,8 +6,8 @@ Construido sobre la base del proyecto anterior ([L7 — Release Candidate del E-
 
 | | |
 |---|---|
-| Tests | 519 en 28 archivos |
-| Pruebas de reglas | 23 contra Firestore real ([resultado](docs/verificacion-reglas.txt)) |
+| Tests | 524 en 28 archivos |
+| Pruebas de reglas | 24 contra Firestore real ([resultado](docs/verificacion-reglas.txt)) |
 | CI | Lint, type-check, tests y build en cada push y PR |
 | Decisiones y uso de IA | [`docs/ai-notes.md`](docs/ai-notes.md) |
 
@@ -53,7 +53,12 @@ El lenguaje de las reglas de Firestore **no permite recorrer un array**. Con los
 
 El proyecto anterior guardaba cada ítem como un documento propio en una subcolección justamente para poder verificar el precio con un `get()`. Ese modelo cerraba un agujero que este reabre. **Es un trade-off consciente**, no un descuido, y está documentado en [`docs/ai-notes.md`](docs/ai-notes.md#el-punto-donde-se-rechazó-el-contrato-del-enunciado-y-se-aceptó-igual).
 
-Mitigación parcial: el service **recalcula** el total a partir de los ítems en vez de copiar el del carrito. No cierra el agujero, pero evita guardar un total que no se corresponde con las líneas de la propia orden.
+Dos mitigaciones, ninguna de las cuales cierra el agujero:
+
+- El service **recalcula** el total a partir de los ítems en vez de copiar el del carrito, así que al menos no se guarda un total incoherente con las líneas de la propia orden.
+- Los listados **omiten** los documentos que no superan la validación en vez de romperse. Sin eso, una orden con `items` basura —que las reglas aceptan— dejaría el historial y el panel inutilizables de forma permanente, porque las órdenes tampoco se pueden borrar.
+
+El límite está verificado como tal: `npm run verify:rules` incluye un caso que **espera "permitido"** al escribir `items: [1, 2, 3]`. Si algún día pasa a dar "rechazado", significará que las reglas ganaron capacidad de validar arrays.
 
 ## Qué incluye
 
@@ -127,7 +132,7 @@ Mitigación parcial: el service **recalcula** el total a partir de los ítems en
 | `npm run test` | Suite completa de Vitest |
 | `npm run lint` | ESLint sobre todo el repositorio |
 | `npm run seed` | Carga productos de prueba (no hace nada si ya hay datos) |
-| `npm run verify:rules` | Ejecuta las 23 pruebas de las reglas contra Firestore real |
+| `npm run verify:rules` | Ejecuta las 24 pruebas de las reglas contra Firestore real |
 
 ## Rutas
 
@@ -167,7 +172,9 @@ delete   nunca
 npm run verify:rules
 ```
 
-Cubre los tres casos obligatorios del enunciado —un cliente no puede leer una orden ajena, un administrador sí puede cambiar el estado, y no puede tocar ningún otro campo— y veinte más.
+Cubre los tres casos obligatorios del enunciado —un cliente no puede leer una orden ajena, un administrador sí puede cambiar el estado, y no puede tocar ningún otro campo— y veintiuno más, incluido el límite conocido de las reglas con los arrays.
+
+Crea dos órdenes de prueba y **las borra al terminar** con el SDK de Admin, dentro de un `finally`: las reglas prohíben el `delete` desde el cliente, así que sin esa limpieza cada corrida ensuciaría el historial real de forma permanente.
 
 **Usa el SDK cliente y no el de Admin**, y esa es la decisión que sostiene todo el ejercicio: el SDK de Admin se saltea las reglas por diseño, así que con él las 23 pruebas pasarían sin comprobar nada.
 
@@ -193,7 +200,9 @@ Una excepción deliberada: `orderConverter.test.ts` **no** mockea `firebase/fire
 
 ## Limitaciones conocidas
 
-- **Un documento corrupto rompe todo el listado.** El converter valida con Zod y lanza si el documento no tiene la forma esperada, así que una orden malformada hace fallar la consulta entera en vez de omitirse. Es la contrapartida de validar estrictamente; la alternativa —descartar los inválidos en silencio— escondería el problema, que en un historial de compras es peor.
+- **Las reglas no pueden validar los elementos de un array.** Un usuario autenticado puede escribir desde la consola del navegador una orden con `items: [1, 2, 3]`: cumple todo lo que las reglas *sí* pueden comprobar (es una lista de entre 1 y 50 elementos) y se acepta. Está verificado contra Firestore real en `npm run verify:rules`, como caso que **espera "permitido"**.
+
+  La app se defiende del lado del cliente: los listados convierten documento por documento y **omiten** los inválidos, registrándolos en la consola. Sin esa defensa, ese único documento dejaría inutilizables el historial de ese cliente y el panel de administración **de forma permanente**, porque las reglas tampoco permiten borrar órdenes. La lectura de *una* orden puntual sigue siendo estricta y falla de forma visible: ahí un null se leería como "no existe" y ocultaría el problema.
 - **6 vulnerabilidades `moderate` sin resolver**, todas con la misma raíz: `uuid < 11.1.1`, que llega de forma transitiva a través de `firebase-admin`. Es una **devDependency** usada solo por `npm run seed`, así que nunca entra al bundle. No se aplica `npm audit fix --force` porque **degradaría** `firebase-admin` de `^14.2.0` a `10.3.0` — cuatro versiones mayores hacia atrás, con sus propios agujeros sin parchear, para tapar uno que no es alcanzable desde este código.
 - **Sin paginación en el panel de administración.** Con muchas órdenes, el listado global las trae todas. Fuera del alcance de esta homework.
 

@@ -10,6 +10,7 @@ import {
   updateDoc,
   where,
   type QueryConstraint,
+  type QueryDocumentSnapshot,
 } from "firebase/firestore";
 import { FirebaseError } from "firebase/app";
 import type { CartState } from "@/features/cart/types";
@@ -24,17 +25,41 @@ import {
   type OrderItemSnapshot,
   type OrderStatus,
 } from "@/types/order";
-import { orderConverter } from "./orderConverter";
+import { orderConverter, parseOrderSnapshot } from "./orderConverter";
 
 // El nombre de la colección en una constante: se usa acá y en firestore.rules,
 // y tenerlo escrito a mano en varios lugares es la forma más fácil de que un día
 // no coincidan.
 export const ORDERS_COLLECTION = "orders";
 
-// Referencia a la colección PARA LEER: lleva el converter, así getDocs() devuelve
-// objetos Order ya validados y con las fechas como Date.
-function ordersReadCollection() {
-  return collection(db, ORDERS_COLLECTION).withConverter(orderConverter);
+// Referencia a la colección para las CONSULTAS DE LISTADO.
+//
+// A propósito NO lleva el converter. El converter valida con .parse(), que lanza
+// ante un documento con forma inválida — y en un listado, un solo documento roto
+// haría fallar la consulta entera.
+//
+// Eso no es hipotético: las reglas no pueden validar los elementos de un array,
+// así que cualquier usuario autenticado puede escribir una orden con
+// `items: [1, 2, 3]` desde la consola del navegador. Con el converter estricto,
+// eso dejaría inutilizables su historial y el panel de administración de forma
+// PERMANENTE, porque las reglas tampoco permiten borrar órdenes.
+//
+// Los listados convierten documento por documento con parseOrderSnapshot(), que
+// omite los inválidos y los registra.
+function ordersCollection() {
+  return collection(db, ORDERS_COLLECTION);
+}
+
+/**
+ * Convierte los documentos de un listado, descartando los que estén corruptos.
+ *
+ * @param documentos  los snapshots que devolvió la consulta.
+ * @returns           solo las órdenes que superaron la validación.
+ */
+function mapearOrdenesValidas(documentos: QueryDocumentSnapshot[]): Order[] {
+  return documentos
+    .map((documento) => parseOrderSnapshot(documento))
+    .filter((orden): orden is Order => orden !== null);
 }
 
 // Referencia a un documento PARA ESCRIBIR: sin converter, porque las escrituras
@@ -154,7 +179,17 @@ export async function createOrderFromCart(
   // orderWriteSchema quedaría de adorno y el código que escribe podría alejarse
   // de él sin que nadie se entere, hasta que algo falle al leer las órdenes
   // mucho después, lejos de la causa.
-  const payload = orderWriteSchema.parse({
+  //
+  // Se usa safeParse y NO parse, aunque esto esté fuera del try. Con parse, un
+  // ZodError crudo escaparía sin pasar por mapOrderError, y el usuario vería un
+  // error técnico en inglés. Envolverlo simplemente en el try tampoco alcanzaba:
+  // mapOrderError no reconoce los errores de Zod, así que caía en UNKNOWN_ERROR
+  // con el mensaje "intentá de nuevo en unos minutos" y marcado como
+  // reintentable — engañoso, porque reintentar con el mismo carrito falla igual.
+  //
+  // El caso es alcanzable: alguien con un carrito manipulado en localStorage
+  // (por ejemplo, una cantidad mayor al máximo permitido por ítem) llega hasta acá.
+  const validacion = orderWriteSchema.safeParse({
     userId,
     items,
     total,
@@ -163,6 +198,19 @@ export async function createOrderFromCart(
     // completada sin haber pasado por el flujo.
     status: "pending",
   });
+
+  if (!validacion.success) {
+    throw new OrderError(
+      ORDER_ERROR_CODES.INVALID_ORDER,
+      "Hay un problema con los datos de tu carrito. Vacialo, volvé a agregar los productos y probá de nuevo.",
+      // El detalle técnico queda en "cause" para poder diagnosticarlo, sin que
+      // llegue nunca a la pantalla. Y no es reintentable: el mismo carrito
+      // volvería a fallar exactamente igual.
+      { cause: validacion.error },
+    );
+  }
+
+  const payload = validacion.data;
 
   try {
     await setDoc(orderWriteRef(orderId), {
@@ -258,14 +306,14 @@ async function findOwnOrder(orderId: string, userId: string): Promise<Order | nu
 export async function getOrdersByUser(userId: string): Promise<Order[]> {
   try {
     const ordersQuery = query(
-      ordersReadCollection(),
+      ordersCollection(),
       where("userId", "==", userId),
       orderBy("createdAt", "desc"),
     );
 
     const snapshot = await getDocs(ordersQuery);
 
-    return snapshot.docs.map((document) => document.data());
+    return mapearOrdenesValidas(snapshot.docs);
   } catch (error) {
     throw mapOrderError(error);
   }
@@ -317,9 +365,9 @@ export async function listOrders(filters: { status?: OrderStatus } = {}): Promis
 
     constraints.push(orderBy("createdAt", "desc"));
 
-    const snapshot = await getDocs(query(ordersReadCollection(), ...constraints));
+    const snapshot = await getDocs(query(ordersCollection(), ...constraints));
 
-    return snapshot.docs.map((document) => document.data());
+    return mapearOrdenesValidas(snapshot.docs);
   } catch (error) {
     throw mapOrderError(error);
   }

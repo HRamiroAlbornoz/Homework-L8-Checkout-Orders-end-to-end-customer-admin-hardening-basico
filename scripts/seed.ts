@@ -3,6 +3,7 @@ import { getFirestore } from "firebase-admin/firestore";
 import { z } from "zod";
 import { CATEGORIES, type CategoryId } from "../src/constants/categories.js";
 import type { ProductDoc } from "../src/types/product.js";
+import { loadServiceAccount } from "./serviceAccount.js";
 
 // Este script usa el SDK de ADMIN de Firebase, no el SDK cliente.
 //
@@ -31,52 +32,12 @@ const seedEnvSchema = z.object({
     .min(1, "Falta FIREBASE_SERVICE_ACCOUNT_JSON en .env (Firebase Console → Configuración → Cuentas de servicio)"),
 });
 
-// Solo los tres campos que se usan, igual que en la Vercel Function. Validarlos
-// convierte un fallo críptico de OpenSSL en un mensaje que dice qué falta.
-const serviceAccountSchema = z.object({
-  project_id: z.string().min(1),
-  client_email: z.string().min(1),
-  private_key: z.string().min(1),
-});
-
 const env = seedEnvSchema.parse(process.env);
 
-/**
- * Parsea el JSON del service account con un mensaje útil si falla.
- *
- * El error nativo de JSON.parse ("Expected property name or '}' at position 1")
- * describe el síntoma pero no la causa, que casi siempre es la misma: el JSON
- * quedó pegado en varias líneas dentro del .env. El parser de .env de Node lee
- * un par clave=valor POR LÍNEA, así que en ese caso el valor termina siendo
- * apenas "{".
- */
-function parseServiceAccount(rawJson: string): unknown {
-  try {
-    return JSON.parse(rawJson);
-  } catch {
-    throw new Error(
-      "FIREBASE_SERVICE_ACCOUNT_JSON no contiene un JSON válido.\n" +
-        "Causa más frecuente: el JSON está pegado en varias líneas dentro del .env.\n" +
-        "Un archivo .env admite un valor por línea: el JSON tiene que ir COMPLETO en una sola.\n" +
-        "Para convertirlo:\n" +
-        `  node -e "const fs=require('fs');console.log(JSON.stringify(JSON.parse(fs.readFileSync(process.argv[1],'utf8'))))" ruta/al/service-account.json`,
-    );
-  }
-}
-
-const serviceAccount = serviceAccountSchema.parse(
-  parseServiceAccount(env.FIREBASE_SERVICE_ACCOUNT_JSON),
-);
-
+// El parseo y la validación de la credencial viven en scripts/serviceAccount.ts,
+// porque los comparte con el script de verificación de reglas.
 const app = initializeApp({
-  credential: cert({
-    projectId: serviceAccount.project_id,
-    clientEmail: serviceAccount.client_email,
-    // Mismo tratamiento que en api/uploads/presign.ts: según cómo se haya
-    // guardado el JSON, los saltos de línea de la clave pueden quedar como los
-    // dos caracteres literales \ y n en vez de saltos reales.
-    privateKey: serviceAccount.private_key.replace(/\\n/g, "\n"),
-  }),
+  credential: cert(loadServiceAccount(env.FIREBASE_SERVICE_ACCOUNT_JSON)),
 });
 
 const db = getFirestore(app);

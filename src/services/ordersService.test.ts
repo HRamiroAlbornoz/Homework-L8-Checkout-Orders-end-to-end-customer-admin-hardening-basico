@@ -61,7 +61,17 @@ vi.mock("firebase/firestore", () => {
   };
 });
 
+// El converter se mockea porque su conversión ya está probada a fondo en
+// orderConverter.test.ts. Acá interesa el SERVICE: qué consulta arma, qué
+// escribe, y qué hace con lo que el converter le devuelve —incluido el caso en
+// que devuelve null porque el documento está corrupto—.
+vi.mock("./orderConverter", () => ({
+  orderConverter: { __marca: "converter" },
+  parseOrderSnapshot: vi.fn(),
+}));
+
 import { collection, doc, getDoc, getDocs, setDoc, updateDoc } from "firebase/firestore";
+import { parseOrderSnapshot } from "./orderConverter";
 import {
   createOrderFromCart,
   createOrderId,
@@ -168,6 +178,13 @@ beforeEach(() => {
 
   vi.mocked(setDoc).mockResolvedValue(undefined);
   vi.mocked(updateDoc).mockResolvedValue(undefined);
+
+  // Por defecto, el converter devuelve tal cual lo que trae el snapshot. Los
+  // tests que necesitan simular un documento corrupto lo sobrescriben para que
+  // devuelva null en esa posición.
+  vi.mocked(parseOrderSnapshot).mockImplementation(
+    (snapshot) => (snapshot as unknown as { data: () => Order }).data(),
+  );
 });
 
 // ===========================================================================
@@ -441,6 +458,25 @@ describe("getOrdersByUser", () => {
     vi.mocked(getDocs).mockResolvedValue(resultadoDeConsulta([]) as never);
 
     await expect(getOrdersByUser("uid-1")).resolves.toEqual([]);
+  });
+
+  it("omite un documento corrupto en vez de romper el listado entero", async () => {
+    // Las reglas de Firestore no pueden validar los elementos de un array, así
+    // que cualquier usuario autenticado puede escribir una orden con
+    // `items: [1,2,3]` desde la consola del navegador. Si un solo documento
+    // inválido hiciera fallar la consulta, ese usuario dejaría su propio
+    // historial —y el panel de administración— inutilizables PARA SIEMPRE,
+    // porque las reglas tampoco permiten borrar órdenes.
+    vi.mocked(parseOrderSnapshot)
+      .mockReturnValueOnce(makeOrder({ id: "sana-1" }))
+      .mockReturnValueOnce(null)
+      .mockReturnValueOnce(makeOrder({ id: "sana-2" }));
+
+    vi.mocked(getDocs).mockResolvedValue({ docs: [{}, {}, {}] } as never);
+
+    const ordenes = await getOrdersByUser("uid-1");
+
+    expect(ordenes.map((orden) => orden.id)).toEqual(["sana-1", "sana-2"]);
   });
 
   it("traduce el índice compuesto faltante a un código propio", async () => {

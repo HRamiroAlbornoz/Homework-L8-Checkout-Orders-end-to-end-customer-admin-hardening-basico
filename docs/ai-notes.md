@@ -206,6 +206,50 @@ El historial fallaba con `MISSING_INDEX` y se reintentó varias veces sospechand
 
 ---
 
+## Auditoría final: `/code-review` sobre la rama completa
+
+Antes de abrir el Pull Request se pasó una revisión automatizada sobre los nueve commits. Encontró **cinco problemas, y los cinco eran reales**. Se corrigieron todos.
+
+Vale registrar la predicción fallida: antes de correrla se anticipó que el revisor marcaría cosas correctas —decisiones deliberadas y documentadas— que habría que filtrar. No pasó. Todo lo que marcó había que arreglarlo.
+
+### 1. Un documento corrupto rompía el listado entero *(el más grave)*
+
+Estaba documentado en el README como "limitación conocida", tratándolo como un **accidente**. La revisión mostró que es **explotable a propósito**: como las reglas no pueden validar los elementos de un array, cualquier usuario autenticado puede escribir `items: [1, 2, 3]` desde la consola del navegador. Con la validación estricta en los listados, ese único documento dejaba inutilizables su historial **y el panel de administración** — de forma permanente, porque las reglas tampoco permiten borrar órdenes.
+
+No es una limitación: es una **denegación de servicio** que se provoca en dos líneas.
+
+**Corrección:** los listados usan `parseOrderSnapshot()`, que valida con `safeParse` y omite los documentos inválidos registrándolos en la consola. La lectura de *una* orden puntual sigue siendo estricta: ahí un null se leería como "no existe" y ocultaría el problema.
+
+**Verificación:** se agregó un caso a `verify:rules` que **espera "permitido"** al escribir esos ítems inválidos, confirmando el límite contra Firestore real, más un test unitario de que el listado omite el documento roto y devuelve los sanos.
+
+### 2. Un `ZodError` crudo escapaba del checkout
+
+`orderWriteSchema.parse` estaba fuera del `try`, así que un carrito manipulado (por ejemplo, con una cantidad mayor al máximo) producía un error técnico en inglés en lugar del `OrderError` documentado. Meterlo dentro del `try` tampoco alcanzaba: `mapOrderError` no reconoce los errores de Zod y lo habría convertido en `UNKNOWN_ERROR` con un *"intentá de nuevo en unos minutos"* marcado como reintentable — engañoso, porque el mismo carrito falla siempre igual.
+
+**Corrección:** `safeParse` con un `OrderError` propio, no reintentable, que le dice al usuario qué hacer (vaciar el carrito). Y se atacó la causa raíz: `cartItemSchema` no tenía tope de cantidad aunque el reducer sí lo aplicaba, así que ahora un carrito manipulado se rechaza **al leerlo de `localStorage`**, en la puerta de entrada, y no tres pantallas después.
+
+### 3. El diálogo de confirmación era inalcanzable con teclado
+
+El panel se renderiza **arriba** de la tabla, pero se dispara desde un `<select>` que está **dentro** de ella. Sin mover el foco, quien navega con Tab nunca llegaba a los botones: quedaron detrás en el orden del documento.
+
+**Corrección:** el foco entra al botón de confirmar al abrir y vuelve al `<select>` al cerrar, Escape cancela, y el diálogo se anuncia con `aria-labelledby` apuntando al texto del cambio. **No** se declaró `aria-modal`: no hay trampa de foco, y declararlo sería mentirle a la tecnología de asistencia.
+
+### 4. El script de verificación podía reportar éxito sin verificar nada
+
+`comprobar()` daba por buena **cualquier** excepción como "rechazado por las reglas". Con ese criterio, una prueba que espera un rechazo pasaba también ante un corte de red, un índice faltante o un error de tipeo en el propio script — y el informe decía "23 de 23" sin haber comprobado una sola regla.
+
+Es exactamente el error que este documento critica más arriba al hablar de la contraprueba, cometido en el archivo siguiente. **Un chequeo cuyo resultado no depende de lo que chequea da confianza falsa, que es peor que no tener chequeo.**
+
+**Corrección:** solo cuenta como rechazo un `FirebaseError` con código `permission-denied`. Cualquier otra cosa se marca como fallo inesperado, se imprime con su causa y hace fallar el script.
+
+### 5. El script contaminaba la base en cada corrida
+
+Creaba órdenes de prueba que **las reglas vuelven imposibles de borrar desde el cliente**, así que quedaban para siempre en el historial real y en el panel. Se había mencionado el problema ("borralas desde la consola") sin notar que desde el cliente no se podían borrar.
+
+**Corrección:** limpieza con el SDK de Admin dentro de un `finally`, para que ocurra aunque una prueba falle. Es la única parte del script que se saltea las reglas, y es deliberado: ahí no se verifica nada, se limpia.
+
+---
+
 ## Decisiones tomadas sin consultar a la IA
 
 Para dejar clara la frontera de lo que se delegó:

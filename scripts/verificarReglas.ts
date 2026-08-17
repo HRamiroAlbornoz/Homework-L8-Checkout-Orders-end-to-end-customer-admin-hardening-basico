@@ -1,4 +1,4 @@
-import { initializeApp } from "firebase/app";
+import { FirebaseError, initializeApp } from "firebase/app";
 import { getAuth, signInWithEmailAndPassword, signOut, type Auth } from "firebase/auth";
 import {
   collection,
@@ -14,8 +14,11 @@ import {
   where,
   type Firestore,
 } from "firebase/firestore";
+import { cert, deleteApp as deleteAdminApp, initializeApp as initializeAdminApp } from "firebase-admin/app";
+import { getFirestore as getAdminFirestore } from "firebase-admin/firestore";
 import { z } from "zod";
 import { envSchema } from "../src/lib/envSchema.js";
+import { loadServiceAccount } from "./serviceAccount.js";
 
 // ============================================================================
 // PRUEBAS DE CAJA NEGRA DE LAS REGLAS DE FIRESTORE
@@ -44,6 +47,13 @@ const scriptEnvSchema = envSchema.extend({
   TEST_CUSTOMER_PASSWORD: z.string().min(1, "Falta TEST_CUSTOMER_PASSWORD en .env"),
   TEST_ADMIN_EMAIL: z.string().min(1, "Falta TEST_ADMIN_EMAIL en .env"),
   TEST_ADMIN_PASSWORD: z.string().min(1, "Falta TEST_ADMIN_PASSWORD en .env"),
+  // Hace falta para BORRAR las órdenes de prueba al terminar. Las reglas
+  // prohíben el delete desde el cliente —una orden es un registro histórico—,
+  // así que sin el SDK de Admin quedarían para siempre en la base, ensuciando
+  // el historial real del cliente y el panel de administración.
+  FIREBASE_SERVICE_ACCOUNT_JSON: z
+    .string()
+    .min(1, "Falta FIREBASE_SERVICE_ACCOUNT_JSON en .env (se usa para limpiar las órdenes de prueba)"),
 });
 
 const env = scriptEnvSchema.parse(process.env);
@@ -65,12 +75,43 @@ const ORDERS = "orders";
 let pruebasCorridas = 0;
 let pruebasFallidas = 0;
 
+// Ids de TODAS las órdenes que crea el script, para poder borrarlas al terminar.
+//
+// Es una lista y no dos variables sueltas porque algunas pruebas crean órdenes
+// además de las dos de preparación —por ejemplo, la que comprueba el límite de
+// las reglas con los arrays—. Con variables sueltas, cada prueba nueva que
+// escriba algo se olvidaría de limpiarlo y la base se iría ensuciando de a poco.
+const ordenesACancelar: string[] = [];
+
+/**
+ * Resultado observable de una operación.
+ *
+ * "rechazado" significa específicamente que LAS REGLAS la denegaron. Cualquier
+ * otro fallo es "fallo-inesperado" y NO cuenta como verificación.
+ */
+type Resultado = "permitido" | "rechazado" | "fallo-inesperado";
+
 /**
  * Ejecuta una operación y comprueba si fue permitida o rechazada, según lo esperado.
  *
  * @param descripcion   qué se está probando, en palabras.
  * @param seEspera      "permitido" si la operación debe funcionar, "rechazado" si no.
  * @param operacion     la operación contra Firestore.
+ *
+ * ⚠ POR QUÉ NO ALCANZA CON "HUBO EXCEPCIÓN = FUE RECHAZADO"
+ *
+ * Una versión anterior de esta función daba por buena cualquier excepción. Con
+ * ese criterio, una prueba que espera un rechazo pasaba también si se caía la
+ * red, si faltaba un índice o si había un error de tipeo en el propio script —
+ * y el informe decía "23 de 23" sin haber comprobado una sola regla.
+ *
+ * Ese es exactamente el error que este script existe para no cometer: un
+ * chequeo cuyo resultado no depende de lo que chequea da confianza falsa, que
+ * es peor que no tener chequeo.
+ *
+ * Por eso solo se cuenta como "rechazado" un FirebaseError con código
+ * "permission-denied", que es el que emiten las reglas. Todo lo demás se marca
+ * como fallo inesperado, se imprime con su causa y hace fallar el script.
  *
  * No corta la ejecución ante un fallo: interesa el informe completo, no el
  * primer problema. El código de salida al final refleja si hubo alguno.
@@ -82,15 +123,20 @@ async function comprobar(
 ): Promise<void> {
   pruebasCorridas += 1;
 
-  let resultado: "permitido" | "rechazado";
+  let resultado: Resultado;
   let detalle = "";
 
   try {
     await operacion();
     resultado = "permitido";
   } catch (error) {
-    resultado = "rechazado";
-    detalle = error instanceof Error ? ` (${error.message.slice(0, 60)}…)` : "";
+    if (error instanceof FirebaseError && error.code === "permission-denied") {
+      resultado = "rechazado";
+    } else {
+      resultado = "fallo-inesperado";
+      detalle =
+        error instanceof Error ? `${error.name}: ${error.message}` : `valor lanzado: ${String(error)}`;
+    }
   }
 
   const paso = resultado === seEspera;
@@ -100,10 +146,46 @@ async function comprobar(
   }
 
   const marca = paso ? "OK  " : "FALLA";
-  console.log(`${marca} | esperado: ${seEspera.padEnd(10)} | real: ${resultado.padEnd(10)} | ${descripcion}`);
+  console.log(
+    `${marca} | esperado: ${seEspera.padEnd(10)} | real: ${resultado.padEnd(16)} | ${descripcion}`,
+  );
 
   if (!paso && detalle) {
-    console.log(`      ${detalle}`);
+    console.log(`       causa: ${detalle}`);
+  }
+}
+
+/**
+ * Borra las órdenes creadas por esta corrida.
+ *
+ * @param ids  ids de las órdenes de prueba.
+ *
+ * Usa el SDK de ADMIN, y no el cliente, porque las reglas prohíben el delete a
+ * cualquiera: una orden es un registro histórico y no se borra desde la
+ * aplicación. Esa misma regla —correcta— haría que estas órdenes de prueba
+ * quedaran para siempre en la base, contaminando el historial real del cliente
+ * y el panel de administración con datos falsos.
+ *
+ * Es la única parte del script que se saltea las reglas, y es a propósito: acá
+ * no se está verificando nada, se está limpiando.
+ */
+async function limpiarOrdenesDePrueba(ids: string[]): Promise<void> {
+  const adminApp = initializeAdminApp(
+    { credential: cert(loadServiceAccount(env.FIREBASE_SERVICE_ACCOUNT_JSON)) },
+    // Nombre propio para no chocar con ninguna otra app ya inicializada.
+    "limpieza-verificacion-reglas",
+  );
+
+  try {
+    const adminDb = getAdminFirestore(adminApp);
+
+    await Promise.all(ids.map((id) => adminDb.collection(ORDERS).doc(id).delete()));
+
+    console.log(`\nÓrdenes de prueba eliminadas: ${ids.length}`);
+  } finally {
+    // Sin esto, el proceso queda vivo esperando a que la conexión del SDK de
+    // Admin se cierre sola.
+    await deleteAdminApp(adminApp);
   }
 }
 
@@ -118,6 +200,8 @@ async function crearOrdenDePrueba(userId: string): Promise<string> {
     status: "pending",
     createdAt: serverTimestamp(),
   });
+
+  ordenesACancelar.push(referencia.id);
 
   return referencia.id;
 }
@@ -146,6 +230,38 @@ async function main(): Promise<void> {
 
   await signOut(auth);
 
+  // A partir de acá las órdenes de prueba YA EXISTEN, así que todo lo que sigue
+  // va dentro de un try/finally: la limpieza tiene que ocurrir aunque una
+  // prueba falle o el script se rompa a mitad de camino. Sin eso, cada corrida
+  // con problemas dejaría dos órdenes más contaminando la base — y son
+  // imposibles de borrar desde el cliente.
+  try {
+    await ejecutarPruebas(customer.user.uid, admin.user.uid, ordenDelCustomer, ordenDelAdmin);
+  } finally {
+    await limpiarOrdenesDePrueba(ordenesACancelar);
+  }
+
+  console.log(`\n${pruebasCorridas} pruebas — ${pruebasFallidas} fallaron`);
+
+  // Código de salida distinto de cero si algo falló: así el resultado sirve
+  // también desde un pipeline, no solo mirándolo.
+  process.exit(pruebasFallidas === 0 ? 0 : 1);
+}
+
+/**
+ * Las pruebas propiamente dichas.
+ *
+ * @param uidCustomer      uid del cliente.
+ * @param uidAdmin         uid del administrador.
+ * @param ordenDelCustomer id de la orden de prueba del cliente.
+ * @param ordenDelAdmin    id de la orden de prueba del administrador.
+ */
+async function ejecutarPruebas(
+  uidCustomer: string,
+  uidAdmin: string,
+  ordenDelCustomer: string,
+  ordenDelAdmin: string,
+): Promise<void> {
   // -------------------------------------------------------------------------
   console.log("\n--- COMO CLIENTE ---");
   await signInWithEmailAndPassword(auth, env.TEST_CUSTOMER_EMAIL, env.TEST_CUSTOMER_PASSWORD);
@@ -163,7 +279,7 @@ async function main(): Promise<void> {
     getDocs(
       query(
         collection(db, ORDERS),
-        where("userId", "==", customer.user.uid),
+        where("userId", "==", uidCustomer),
         orderBy("createdAt", "desc"),
       ),
     ),
@@ -184,7 +300,7 @@ async function main(): Promise<void> {
 
   await comprobar("crea una orden a nombre de OTRO usuario", "rechazado", () =>
     setDoc(doc(collection(db, ORDERS)), {
-      userId: admin.user.uid,
+      userId: uidAdmin,
       items: [{ productId: "x", name: "x", priceAtPurchase: 1, quantity: 1 }],
       total: 1,
       status: "pending",
@@ -194,7 +310,7 @@ async function main(): Promise<void> {
 
   await comprobar("crea una orden ya marcada como completada", "rechazado", () =>
     setDoc(doc(collection(db, ORDERS)), {
-      userId: customer.user.uid,
+      userId: uidCustomer,
       items: [{ productId: "x", name: "x", priceAtPurchase: 1, quantity: 1 }],
       total: 1,
       status: "completed",
@@ -204,7 +320,7 @@ async function main(): Promise<void> {
 
   await comprobar("crea una orden con un campo inventado", "rechazado", () =>
     setDoc(doc(collection(db, ORDERS)), {
-      userId: customer.user.uid,
+      userId: uidCustomer,
       items: [{ productId: "x", name: "x", priceAtPurchase: 1, quantity: 1 }],
       total: 1,
       status: "pending",
@@ -215,13 +331,49 @@ async function main(): Promise<void> {
 
   await comprobar("crea una orden con fecha propia en vez de la del servidor", "rechazado", () =>
     setDoc(doc(collection(db, ORDERS)), {
-      userId: customer.user.uid,
+      userId: uidCustomer,
       items: [{ productId: "x", name: "x", priceAtPurchase: 1, quantity: 1 }],
       total: 1,
       status: "pending",
       createdAt: new Date("2020-01-01"),
     }),
   );
+
+  // ⚠ ESTA PRUEBA ESPERA "PERMITIDO", Y ES UN LÍMITE CONOCIDO, NO UN DESCUIDO.
+  //
+  // El lenguaje de las reglas no puede recorrer un array, así que no hay forma
+  // de validar la FORMA de cada ítem. Una orden con `items: [1, 2, 3]` cumple
+  // todo lo que las reglas sí pueden comprobar —es una lista, tiene entre 1 y 50
+  // elementos— y por lo tanto se acepta.
+  //
+  // Es la consecuencia directa del modelo que exige el enunciado (ítems
+  // embebidos). El proyecto anterior guardaba cada ítem como documento propio
+  // justamente para poder validarlo con una regla por ítem.
+  //
+  // La app se defiende del lado del cliente: los listados convierten documento
+  // por documento con parseOrderSnapshot(), que omite los inválidos en lugar de
+  // romperse. Sin esa defensa, este único documento dejaría inutilizables el
+  // historial del cliente y el panel de administración DE FORMA PERMANENTE,
+  // porque las reglas tampoco permiten borrar órdenes.
+  //
+  // Si algún día esta prueba pasa a dar "rechazado", quiere decir que las reglas
+  // ganaron capacidad de validar arrays: hay que celebrarlo y actualizarla.
+  const ordenConItemsInvalidos = doc(collection(db, ORDERS));
+
+  await comprobar(
+    "crea una orden con items que no son objetos (límite conocido de las reglas)",
+    "permitido",
+    () =>
+      setDoc(ordenConItemsInvalidos, {
+        userId: uidCustomer,
+        items: [1, 2, 3],
+        total: 1,
+        status: "pending",
+        createdAt: serverTimestamp(),
+      }),
+  );
+
+  ordenesACancelar.push(ordenConItemsInvalidos.id);
 
   await comprobar("borra su propia orden", "rechazado", () =>
     // deleteDoc se importa dinámicamente para no sumarlo arriba solo por esta
@@ -274,7 +426,7 @@ async function main(): Promise<void> {
 
   await comprobar("cambia el userId (se apropia de la orden)", "rechazado", () =>
     updateDoc(doc(db, ORDERS, ordenDelCustomer), {
-      userId: admin.user.uid,
+      userId: uidAdmin,
       updatedAt: serverTimestamp(),
     }),
   );
@@ -321,16 +473,6 @@ async function main(): Promise<void> {
   );
 
   await signOut(auth);
-
-  // -------------------------------------------------------------------------
-  console.log(`\n${pruebasCorridas} pruebas — ${pruebasFallidas} fallaron`);
-  console.log(`\nÓrdenes de prueba creadas (se pueden borrar desde la consola):`);
-  console.log(`  ${ordenDelCustomer}  (del cliente)`);
-  console.log(`  ${ordenDelAdmin}  (del administrador)`);
-
-  // Código de salida distinto de cero si algo falló: así el resultado sirve
-  // también desde un pipeline, no solo mirándolo.
-  process.exit(pruebasFallidas === 0 ? 0 : 1);
 }
 
 await main();

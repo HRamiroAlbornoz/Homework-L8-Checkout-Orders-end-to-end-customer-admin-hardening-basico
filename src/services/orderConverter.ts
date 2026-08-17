@@ -1,5 +1,73 @@
-import type { FirestoreDataConverter, QueryDocumentSnapshot } from "firebase/firestore";
+import type { DocumentData, FirestoreDataConverter, QueryDocumentSnapshot } from "firebase/firestore";
 import { orderDocSchema, type Order, type OrderDoc } from "@/types/order";
+
+/**
+ * Arma el objeto de dominio a partir del id y del documento ya validado.
+ *
+ * @param id   id del documento (llega aparte, no es un campo del documento).
+ * @param doc  documento validado contra orderDocSchema.
+ * @returns    la orden con las fechas como Date.
+ */
+function toDomainOrder(id: string, doc: OrderDoc): Order {
+  return {
+    id,
+    userId: doc.userId,
+    items: doc.items,
+    total: doc.total,
+    status: doc.status,
+    createdAt: doc.createdAt.toDate(),
+    // El spread condicional es por "exactOptionalPropertyTypes" (activo en el
+    // tsconfig): con ese flag, escribir `updatedAt: undefined` NO es lo mismo
+    // que omitir la propiedad, y el compilador lo rechaza. Así, una orden que
+    // nunca fue actualizada simplemente no tiene el campo, en vez de tenerlo
+    // con valor undefined.
+    ...(doc.updatedAt && { updatedAt: doc.updatedAt.toDate() }),
+  };
+}
+
+/**
+ * Convierte un documento en Order, o devuelve null si está corrupto.
+ *
+ * @param snapshot  documento tal como vino de Firestore.
+ * @returns         la orden, o null si no supera la validación.
+ *
+ * ⚠ POR QUÉ EXISTE ESTA VERSIÓN "BLANDA" ADEMÁS DEL CONVERTER
+ *
+ * Las reglas de Firestore no pueden recorrer un array, así que no hay forma de
+ * validar la forma de cada ítem al escribir. Un cliente autenticado puede
+ * escribir desde la consola del navegador una orden con `items: [1, 2, 3]`: pasa
+ * las reglas (es una lista, tiene entre 1 y 50 elementos) pero no pasa el schema
+ * al leer.
+ *
+ * Si el listado usara la validación estricta, ESE ÚNICO documento haría fallar
+ * la consulta entera — y como las reglas prohíben borrar órdenes, quedaría roto
+ * para siempre: su propio historial y, peor, el listado sin filtrar del panel de
+ * administración. Una denegación de servicio que cualquier usuario podría
+ * provocar en dos líneas.
+ *
+ * Por eso los listados omiten los documentos inválidos en vez de romperse. No se
+ * silencian: se registran en la consola con su id, para poder diagnosticarlos.
+ * En una aplicación con monitoreo, esta línea iría a un servicio de seguimiento
+ * de errores en lugar de a la consola.
+ *
+ * La lectura de UNA orden puntual (getOrderById) sigue usando el converter
+ * estricto: ahí, un documento roto tiene que fallar de forma visible, porque
+ * devolver null se leería como "no existe" y ocultaría el problema.
+ */
+export function parseOrderSnapshot(snapshot: QueryDocumentSnapshot<DocumentData>): Order | null {
+  const resultado = orderDocSchema.safeParse(snapshot.data({ serverTimestamps: "estimate" }));
+
+  if (!resultado.success) {
+    console.error(
+      `[orders] El documento ${snapshot.id} tiene una forma inválida y se omitió del listado.`,
+      resultado.error.issues,
+    );
+
+    return null;
+  }
+
+  return toDomainOrder(snapshot.id, resultado.data);
+}
 
 /**
  * Traduce entre el documento de Firestore y el tipo de dominio Order.
@@ -49,23 +117,12 @@ export const orderConverter: FirestoreDataConverter<Order, OrderDoc> = {
     // valida nada al leer, así que un documento escrito por una versión anterior
     // de la app, o editado a mano desde la consola, llegaría con cualquier
     // forma. Zod es lo único que lo comprueba de verdad.
-    const doc = orderDocSchema.parse(raw);
-
-    return {
-      // El id NO es un campo del documento: viaja aparte, en el snapshot.
-      id: snapshot.id,
-      userId: doc.userId,
-      items: doc.items,
-      total: doc.total,
-      status: doc.status,
-      createdAt: doc.createdAt.toDate(),
-      // El spread condicional es por "exactOptionalPropertyTypes" (activo en el
-      // tsconfig): con ese flag, escribir `updatedAt: undefined` NO es lo mismo
-      // que omitir la propiedad, y el compilador lo rechaza. Así, una orden que
-      // nunca fue actualizada simplemente no tiene el campo, en vez de tenerlo
-      // con valor undefined.
-      ...(doc.updatedAt && { updatedAt: doc.updatedAt.toDate() }),
-    };
+    //
+    // Acá se usa .parse() (que lanza) y no .safeParse(): este camino lo usa la
+    // lectura de UNA orden puntual, donde un documento roto tiene que fallar de
+    // forma visible. Para los LISTADOS existe parseOrderSnapshot(), que omite
+    // los inválidos en vez de tirar abajo la consulta entera.
+    return toDomainOrder(snapshot.id, orderDocSchema.parse(raw));
   },
 
   /**

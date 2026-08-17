@@ -238,6 +238,72 @@ describe("AdminOrdersPage — cambio de estado", () => {
   });
 });
 
+describe("AdminOrdersPage — accesibilidad de la confirmación", () => {
+  it("mueve el foco al botón de confirmar al abrirse", async () => {
+    const user = userEvent.setup();
+    vi.mocked(listOrders).mockResolvedValue([makeOrder({ id: "o-1", status: "pending" })]);
+
+    renderWithProviders(<AdminOrdersPage />);
+    await screen.findByLabelText(/cambiar el estado de la orden o-1/i);
+
+    await user.selectOptions(selectorDeEstado("o-1"), "processing");
+
+    // El panel se renderiza ARRIBA de la tabla pero se dispara desde un <select>
+    // que está DENTRO de ella. Sin mover el foco, quien navega con teclado sigue
+    // tabulando hacia adelante y nunca llega a los botones: quedaron detrás en
+    // el orden del documento. La acción sería inalcanzable sin mouse.
+    expect(await screen.findByRole("button", { name: /sí, cambiar el estado/i })).toHaveFocus();
+  });
+
+  it("el diálogo se anuncia con el texto del cambio, no como 'diálogo' a secas", async () => {
+    const user = userEvent.setup();
+    vi.mocked(listOrders).mockResolvedValue([makeOrder({ id: "o-1", status: "pending" })]);
+
+    renderWithProviders(<AdminOrdersPage />);
+    await screen.findByLabelText(/cambiar el estado de la orden o-1/i);
+
+    await user.selectOptions(selectorDeEstado("o-1"), "processing");
+
+    const dialogo = await screen.findByRole("alertdialog");
+    expect(dialogo).toHaveAccessibleName(/vas a cambiar la orden o-1/i);
+  });
+
+  it("Escape cancela sin escribir nada", async () => {
+    const user = userEvent.setup();
+    vi.mocked(listOrders).mockResolvedValue([makeOrder({ id: "o-1", status: "pending" })]);
+
+    renderWithProviders(<AdminOrdersPage />);
+    await screen.findByLabelText(/cambiar el estado de la orden o-1/i);
+
+    await user.selectOptions(selectorDeEstado("o-1"), "processing");
+    await screen.findByRole("alertdialog");
+
+    await user.keyboard("{Escape}");
+
+    await waitFor(() => {
+      expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    });
+    expect(updateOrderStatus).not.toHaveBeenCalled();
+  });
+
+  it("al cancelar devuelve el foco al selector que lo abrió", async () => {
+    const user = userEvent.setup();
+    vi.mocked(listOrders).mockResolvedValue([makeOrder({ id: "o-1", status: "pending" })]);
+
+    renderWithProviders(<AdminOrdersPage />);
+    await screen.findByLabelText(/cambiar el estado de la orden o-1/i);
+
+    await user.selectOptions(selectorDeEstado("o-1"), "processing");
+    await user.click(await screen.findByRole("button", { name: /^cancelar$/i }));
+
+    // Sin esto, cancelar deja el foco en la nada y hay que recorrer la página
+    // entera de nuevo para retomar donde se estaba.
+    await waitFor(() => {
+      expect(selectorDeEstado("o-1")).toHaveFocus();
+    });
+  });
+});
+
 describe("AdminOrdersPage — el listado", () => {
   it("muestra el cliente, las unidades y el total de cada orden", async () => {
     vi.mocked(listOrders).mockResolvedValue([

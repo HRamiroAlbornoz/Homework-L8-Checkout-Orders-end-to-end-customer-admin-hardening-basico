@@ -2,34 +2,33 @@
 Verificación de las reglas de Firestore
 
 --- COMO CLIENTE ---
-OK   | esperado: permitido  | real: permitido  | lee su propia orden
-OK   | esperado: rechazado  | real: rechazado  | lee una orden AJENA
-OK   | esperado: permitido  | real: permitido  | lista sus órdenes filtrando por su uid
-OK   | esperado: rechazado  | real: rechazado  | lista TODAS las órdenes, sin filtrar por su uid
-OK   | esperado: rechazado  | real: rechazado  | cambia el estado de su propia orden
-OK   | esperado: rechazado  | real: rechazado  | crea una orden a nombre de OTRO usuario
-OK   | esperado: rechazado  | real: rechazado  | crea una orden ya marcada como completada
-OK   | esperado: rechazado  | real: rechazado  | crea una orden con un campo inventado
-OK   | esperado: rechazado  | real: rechazado  | crea una orden con fecha propia en vez de la del servidor
-OK   | esperado: rechazado  | real: rechazado  | borra su propia orden
+OK   | esperado: permitido  | real: permitido        | lee su propia orden
+OK   | esperado: rechazado  | real: rechazado        | lee una orden AJENA
+OK   | esperado: permitido  | real: permitido        | lista sus órdenes filtrando por su uid
+OK   | esperado: rechazado  | real: rechazado        | lista TODAS las órdenes, sin filtrar por su uid
+OK   | esperado: rechazado  | real: rechazado        | cambia el estado de su propia orden
+OK   | esperado: rechazado  | real: rechazado        | crea una orden a nombre de OTRO usuario
+OK   | esperado: rechazado  | real: rechazado        | crea una orden ya marcada como completada
+OK   | esperado: rechazado  | real: rechazado        | crea una orden con un campo inventado
+OK   | esperado: rechazado  | real: rechazado        | crea una orden con fecha propia en vez de la del servidor
+OK   | esperado: permitido  | real: permitido        | crea una orden con items que no son objetos (límite conocido de las reglas)
+OK   | esperado: rechazado  | real: rechazado        | borra su propia orden
 
 --- COMO ADMINISTRADOR ---
-OK   | esperado: permitido  | real: permitido  | lee una orden de otro usuario
-OK   | esperado: permitido  | real: permitido  | lista TODAS las órdenes sin filtro
-OK   | esperado: permitido  | real: permitido  | filtra por estado
-OK   | esperado: permitido  | real: permitido  | cambia el estado con una transición válida
-OK   | esperado: rechazado  | real: rechazado  | cambia SOLO el total
-OK   | esperado: rechazado  | real: rechazado  | cambia el total JUNTO CON el estado
-OK   | esperado: rechazado  | real: rechazado  | cambia el userId (se apropia de la orden)
-OK   | esperado: rechazado  | real: rechazado  | cambia los ítems de la compra
-OK   | esperado: rechazado  | real: rechazado  | hace una transición inválida (processing → pending)
-OK   | esperado: rechazado  | real: rechazado  | pone updatedAt con una fecha propia
-OK   | esperado: rechazado  | real: rechazado  | borra una orden
-OK   | esperado: permitido  | real: permitido  | lleva la orden a un estado terminal
-OK   | esperado: rechazado  | real: rechazado  | saca la orden de un estado terminal
+OK   | esperado: permitido  | real: permitido        | lee una orden de otro usuario
+OK   | esperado: permitido  | real: permitido        | lista TODAS las órdenes sin filtro
+OK   | esperado: permitido  | real: permitido        | filtra por estado
+OK   | esperado: permitido  | real: permitido        | cambia el estado con una transición válida
+OK   | esperado: rechazado  | real: rechazado        | cambia SOLO el total
+OK   | esperado: rechazado  | real: rechazado        | cambia el total JUNTO CON el estado
+OK   | esperado: rechazado  | real: rechazado        | cambia el userId (se apropia de la orden)
+OK   | esperado: rechazado  | real: rechazado        | cambia los ítems de la compra
+OK   | esperado: rechazado  | real: rechazado        | hace una transición inválida (processing → pending)
+OK   | esperado: rechazado  | real: rechazado        | pone updatedAt con una fecha propia
+OK   | esperado: rechazado  | real: rechazado        | borra una orden
+OK   | esperado: permitido  | real: permitido        | lleva la orden a un estado terminal
+OK   | esperado: rechazado  | real: rechazado        | saca la orden de un estado terminal
 
-23 pruebas — 0 fallaron
+Órdenes de prueba eliminadas: 3
 
-Órdenes de prueba creadas (se pueden borrar desde la consola):
-  umYnwnQaUb5WJ4LyfaR4  (del cliente)
-  0wF7KgoXKBkzZQxausrF  (del administrador)
+24 pruebas — 0 fallaron

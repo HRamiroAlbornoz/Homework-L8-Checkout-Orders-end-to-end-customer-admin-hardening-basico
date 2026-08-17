@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { OrderStatusBadge } from "../components/orders/OrderStatusBadge";
 import { EmptyState } from "../components/states/EmptyState";
 import { ErrorState } from "../components/states/ErrorState";
@@ -36,6 +36,33 @@ export function AdminOrdersPage() {
 
   const [actionError, setActionError] = useState<string | null>(null);
 
+  // ---------------------------------------------------------------------------
+  // MANEJO DEL FOCO DE LA CONFIRMACIÓN
+  // ---------------------------------------------------------------------------
+  //
+  // El panel de confirmación se renderiza ARRIBA de la tabla, pero se dispara
+  // desde un <select> que está DENTRO de ella. Sin mover el foco, alguien que
+  // navega con teclado abre la confirmación y, al seguir tabulando, nunca llega
+  // a los botones: quedaron detrás en el orden del documento. La acción sería
+  // literalmente inalcanzable sin mouse.
+  const confirmButtonRef = useRef<HTMLButtonElement>(null);
+
+  // Qué <select> abrió la confirmación, para devolverle el foco al cerrarla. Sin
+  // esto, cancelar deja el foco en la nada y hay que volver a recorrer la página
+  // entera para retomar donde se estaba.
+  const triggerRef = useRef<HTMLSelectElement | null>(null);
+
+  useEffect(() => {
+    if (pendingChange) {
+      confirmButtonRef.current?.focus();
+    }
+  }, [pendingChange]);
+
+  function cerrarConfirmacion(): void {
+    setPendingChange(null);
+    triggerRef.current?.focus();
+  }
+
   function handleFilterChange(value: string): void {
     if (value === "") {
       setStatusFilter(null);
@@ -52,11 +79,12 @@ export function AdminOrdersPage() {
     }
   }
 
-  function handleSelectNextStatus(order: Order, value: string): void {
-    const parsed = orderStatusSchema.safeParse(value);
+  function handleSelectNextStatus(order: Order, select: HTMLSelectElement): void {
+    const parsed = orderStatusSchema.safeParse(select.value);
 
     if (parsed.success) {
       setActionError(null);
+      triggerRef.current = select;
       setPendingChange({ order, nextStatus: parsed.data });
     }
   }
@@ -186,7 +214,7 @@ export function AdminOrdersPage() {
                           // cambio ya se aplicó, cuando todavía falta confirmar.
                           value=""
                           disabled={isUpdating}
-                          onChange={(event) => handleSelectNextStatus(order, event.target.value)}
+                          onChange={(event) => handleSelectNextStatus(order, event.target)}
                         >
                           <option value="">Cambiar a…</option>
                           {/*
@@ -248,8 +276,31 @@ export function AdminOrdersPage() {
         recordar de memoria sobre cuál de las filas se hizo clic.
       */}
       {pendingChange && (
-        <div className="admin-orders__confirm" role="alertdialog" aria-live="assertive">
-          <p>
+        <div
+          className="admin-orders__confirm"
+          role="alertdialog"
+          aria-live="assertive"
+          // aria-labelledby apunta al texto que explica el cambio: es lo que un
+          // lector de pantalla anuncia como nombre del diálogo. Sin esto diría
+          // solo "diálogo de alerta", sin decir de qué.
+          aria-labelledby="confirmacion-cambio-estado"
+          // Escape cancela, que es lo que espera cualquiera frente a un diálogo.
+          // Va acá y no en un listener global: el foco está adentro (lo mueve el
+          // efecto de arriba), así que el evento llega por propagación.
+          onKeyDown={(event) => {
+            if (event.key === "Escape" && updatingOrderId === null) {
+              cerrarConfirmacion();
+            }
+          }}
+        >
+          {/*
+            NO se declara aria-modal="true", a propósito. Ese atributo le dice al
+            lector de pantalla que el resto de la página está inerte, y acá no lo
+            está: es un panel en línea, sin trampa de foco. Declararlo sería
+            mentirle a la tecnología de asistencia. El foco entra al abrir y
+            vuelve al <select> al cerrar, que es lo que resuelve el problema real.
+          */}
+          <p id="confirmacion-cambio-estado">
             Vas a cambiar la orden <strong>{pendingChange.order.id}</strong> de{" "}
             <strong>{ORDER_STATUS_LABELS[pendingChange.order.status]}</strong> a{" "}
             <strong>{ORDER_STATUS_LABELS[pendingChange.nextStatus]}</strong>. Este cambio no se
@@ -258,6 +309,7 @@ export function AdminOrdersPage() {
 
           <div className="admin-orders__confirm-actions">
             <button
+              ref={confirmButtonRef}
               type="button"
               className="admin-orders__confirm-yes"
               onClick={handleConfirmChange}
@@ -268,7 +320,7 @@ export function AdminOrdersPage() {
             <button
               type="button"
               className="admin-orders__confirm-no"
-              onClick={() => setPendingChange(null)}
+              onClick={cerrarConfirmacion}
               disabled={updatingOrderId !== null}
             >
               Cancelar
