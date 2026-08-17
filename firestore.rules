@@ -1,0 +1,248 @@
+rules_version = '2';
+
+// Reglas de seguridad de Firestore para este proyecto. Archivo de referencia
+// versionado junto al código (no se despliega automáticamente con `npm run
+// dev`/`npm run build`, requiere `firebase deploy --only firestore:rules`
+// con el CLI de Firebase inicializado).
+//
+// Por qué existe este archivo: la UI (Header, AdminRoute) oculta o bloquea
+// la navegación según el rol del usuario, pero eso es solo una mejora de UX.
+// Nada impide que alguien llame directamente al SDK de Firestore desde la
+// consola del navegador. La única protección real contra que un usuario lea
+// o escriba datos que no le corresponden es esta capa de reglas.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // -----------------------------------------------------------------------
+    // Funciones auxiliares
+    // -----------------------------------------------------------------------
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // Lee el rol del usuario desde su propio documento de perfil.
+    //
+    // IMPORTANTE (costo): cada get() dentro de una regla cuenta como UNA
+    // LECTURA FACTURABLE, y se ejecuta en cada evaluación de la regla. Por eso
+    // se llama solo en las reglas de escritura de productos, que son
+    // infrecuentes (las hace un admin de vez en cuando), y nunca en las de
+    // lectura del catálogo, que se evalúan en cada visita.
+    //
+    // Si el documento del usuario no existe, get() falla y la regla deniega la
+    // operación. Eso es lo correcto: una identidad sin perfil no tiene rol, y
+    // asumir uno por defecto sería justamente el agujero a evitar.
+    function callerRole() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && callerRole() == 'admin';
+    }
+
+    // -----------------------------------------------------------------------
+    // Catálogo de productos
+    // -----------------------------------------------------------------------
+
+    match /products/{productId} {
+      // Lectura pública: el catálogo se muestra sin requerir sesión.
+      allow read: if true;
+
+      // Alta desde el panel de administración. Se valida el ROL y también la
+      // FORMA del documento: sin la segunda parte, un admin (o alguien con su
+      // sesión) podría escribir un producto sin "nameLower" y dejarlo invisible
+      // en las búsquedas, o sin "name" y romper el render del catálogo para
+      // todos los visitantes.
+      allow create: if isAdmin() && isValidProduct(request.resource.data);
+
+      // Editar y eliminar productos no existen todavía en la aplicación. Las
+      // reglas reflejan lo que la app realmente hace, no lo que podría llegar a
+      // hacer: habilitar por las dudas es exactamente lo contrario al principio
+      // de mínimo privilegio.
+      allow update, delete: if false;
+    }
+
+    function isValidProduct(data) {
+      // hasOnly rechaza campos que no estén en la lista. Sin esto, alguien
+      // podría inyectar campos arbitrarios en el documento (por ejemplo un
+      // "featured: true" que la app no espera) o hacer crecer la base sin
+      // control.
+      return data.keys().hasOnly(['name', 'nameLower', 'categoryId', 'price', 'imageUrl'])
+             && data.name is string
+             && data.name.size() > 0
+             && data.name.size() <= 120
+             && data.nameLower is string
+             // nameLower TIENE que ser el nombre en minúsculas. Es un campo
+             // técnico que sostiene la búsqueda por prefijo: si se pudiera
+             // escribir cualquier cosa ahí, un producto quedaría inencontrable.
+             && data.nameLower == data.name.lower()
+             && data.categoryId in ['calzado', 'ropa', 'accesorios', 'electronica', 'hogar']
+             && data.price is number
+             && data.price > 0
+             && data.imageUrl is string
+             // Solo https: una URL http:// en el atributo src de una <img>
+             // dispara advertencias de contenido mixto y puede ser interceptada.
+             && data.imageUrl.matches('https://.*');
+    }
+
+    // -----------------------------------------------------------------------
+    // Órdenes de compra
+    // -----------------------------------------------------------------------
+
+    match /orders/{orderId} {
+      // Cada usuario ve solo sus propias órdenes. "resource" es el documento
+      // que YA está en la base (a diferencia de "request.resource", que es el
+      // que se intenta escribir).
+      allow read: if isSignedIn() && resource.data.userId == request.auth.uid;
+
+      // El documento de la orden guarda MUY POCO a propósito: quién compró, en
+      // qué estado está y cuándo. Ni los ítems ni los totales.
+      //
+      // Los totales no están porque estas reglas no podrían verificarlos: el
+      // lenguaje no permite recorrer un array ni sumar sus elementos. Un total
+      // guardado sería un número venido del navegador que nadie contrasta contra
+      // nada — y era exactamente lo que permitía comprar a cualquier precio
+      // editando el localStorage. Se calculan al leer, a partir de los ítems de
+      // la subcolección, que sí se verifican uno por uno (ver más abajo).
+      allow create: if isSignedIn()
+                    // hasOnly rechaza cualquier campo que no esté en la lista.
+                    // Sin esto, alguien podría llamar al SDK desde la consola
+                    // del navegador e inyectar campos que la app no espera (un
+                    // "paid: true", o un blob de un megabyte).
+                    && request.resource.data.keys().hasOnly(['userId', 'status', 'createdAt'])
+                    // Nadie puede crear una orden a nombre de otro usuario.
+                    && request.resource.data.userId == request.auth.uid
+                    // El estado inicial siempre es 'created': así nadie puede
+                    // insertar directamente una orden ya marcada como pagada.
+                    && request.resource.data.status == 'created'
+                    // Patrón oficial de Firebase para confirmar que el campo se
+                    // escribió con serverTimestamp() real, y no con una fecha
+                    // armada a mano del lado del cliente.
+                    && request.resource.data.createdAt == request.time;
+
+      // Una orden es un registro histórico: no se edita ni se borra. Un cambio
+      // de estado (a 'paid' o 'cancelled') lo haría un proceso del servidor con
+      // el SDK de Admin, que no pasa por estas reglas.
+      allow update, delete: if false;
+
+      // ---------------------------------------------------------------------
+      // Líneas de la orden
+      // ---------------------------------------------------------------------
+      //
+      // ACÁ ESTÁ LA VERIFICACIÓN DEL PRECIO, y es el motivo de que los ítems
+      // sean documentos separados en vez de un array dentro de la orden.
+      //
+      // Estas reglas no pueden recorrer un array, pero sí pueden leer otros
+      // documentos con get(). Al ser cada ítem un documento propio, cada uno
+      // tiene su propia evaluación de regla — y ahí sí se puede comparar su
+      // precio contra el del producto en el catálogo.
+      match /items/{itemId} {
+        allow read: if isSignedIn() && resource.data.userId == request.auth.uid;
+
+        allow create: if isSignedIn()
+                      // El userId viaja dentro del propio ítem en vez de leerse
+                      // de la orden padre con get(). El motivo: la orden y sus
+                      // ítems se escriben en un mismo writeBatch, y las reglas
+                      // de un lote se evalúan contra el estado ANTERIOR. En ese
+                      // momento la orden todavía no existe, así que un get()
+                      // sobre ella fallaría siempre.
+                      && request.resource.data.userId == request.auth.uid
+                      && request.resource.data.keys().hasOnly([
+                           'userId', 'productId', 'name', 'unitPrice', 'quantity'
+                         ])
+                      && request.resource.data.productId is string
+                      && request.resource.data.name is string
+                      && request.resource.data.name.size() > 0
+                      && request.resource.data.name.size() <= 120
+                      && request.resource.data.quantity is int
+                      && request.resource.data.quantity > 0
+                      // Mismo tope que MAX_QUANTITY_PER_ITEM en
+                      // src/features/cart/cartConstants.ts. Está duplicado a
+                      // propósito: las reglas no pueden importar código de la
+                      // app, y este es el único lugar donde el límite se aplica
+                      // de verdad.
+                      && request.resource.data.quantity <= 99
+                      // LA LÍNEA QUE CIERRA EL AGUJERO: el precio guardado tiene
+                      // que ser EXACTAMENTE el que figura hoy en el catálogo.
+                      //
+                      // Si el producto no existe, get() falla y la regla deniega.
+                      // Si alguien editó el precio en su localStorage, la
+                      // comparación no da y la escritura se rechaza.
+                      //
+                      // Efecto secundario aceptado: si un admin cambia el precio
+                      // de un producto, los carritos que ya lo tenían dejan de
+                      // poder confirmarse. El checkout lo contempla con un
+                      // mensaje que invita a revisar el carrito.
+                      //
+                      // Costo: una lectura facturable por ítem, que se cobra
+                      // aunque la regla termine rechazando la escritura.
+                      && request.resource.data.unitPrice == precioDeCatalogo(request.resource.data.productId);
+
+        // Igual que la orden: las líneas de una compra no se editan ni se borran.
+        allow update, delete: if false;
+      }
+    }
+
+    // Precio actual de un producto del catálogo. Si el documento no existe,
+    // get() falla y la regla que la invoca deniega la operación.
+    function precioDeCatalogo(productId) {
+      return get(/databases/$(database)/documents/products/$(productId)).data.price;
+    }
+
+    // -----------------------------------------------------------------------
+    // Perfiles de usuario
+    // -----------------------------------------------------------------------
+
+    match /users/{uid} {
+      // Un usuario solo puede leer su propio perfil.
+      //
+      // ⚠ ESTA REGLA SOSTIENE LA SUBIDA DE IMÁGENES. No es solo para la app.
+      //
+      // La Vercel Function de api/uploads/presign.ts lee este documento para
+      // averiguar si quien pide subir una imagen es admin, y lo hace con el
+      // token DEL PROPIO USUARIO — no con credenciales de administrador. O sea
+      // que es esta regla la que autoriza esa lectura.
+      //
+      // Consecuencia práctica: si se restringe o se elimina, el panel de
+      // administración deja de poder subir imágenes, y el fallo aparece como un
+      // error del servidor sin relación aparente con las reglas.
+      allow read: if request.auth != null && request.auth.uid == uid;
+
+      // Alta del perfil: solo el propio usuario recién creado en Auth puede
+      // crear su documento (nunca en nombre de otro uid), y el rol queda
+      // forzado a "customer" a nivel de reglas — coincide con
+      // createUserProfile(), que nunca acepta el rol como parámetro externo,
+      // pero esta regla es la que de verdad lo garantiza aunque alguien
+      // intente escribir directo con el SDK, sin pasar por la app.
+      //
+      // Además de "role", se valida la forma completa del documento: sin
+      // esto, alguien podría escribir { role: "customer" } a secas (pasando
+      // la regla) y crear un perfil sin email/displayName/createdAt, que
+      // después rompe la lectura (userDocSchema.parse falla) dejando la
+      // cuenta inutilizable de forma permanente.
+      allow create: if request.auth != null
+                    && request.auth.uid == uid
+                    && request.resource.data.role == 'customer'
+                    && request.resource.data.email is string
+                    && request.resource.data.email.size() > 0
+                    && request.resource.data.displayName is string
+                    && request.resource.data.createdAt == request.time;
+
+      // Actualización: el dueño del documento puede modificar su propio
+      // perfil, pero el campo "role" tiene que quedar exactamente igual al
+      // valor que ya tenía. Así, aunque alguien intente hacer
+      // updateDoc(doc(db, "users", miUid), { role: "admin" }) directamente
+      // desde la consola del navegador, Firestore rechaza la escritura.
+      // Un ascenso real a "admin" solo puede hacerse manualmente desde la
+      // Firebase Console (como indica el enunciado del homework), nunca
+      // desde el cliente.
+      allow update: if request.auth != null
+                    && request.auth.uid == uid
+                    && request.resource.data.role == resource.data.role;
+
+      // Sin baja de perfiles: no hay ningún flujo de "eliminar cuenta" en
+      // la app todavía.
+      allow delete: if false;
+    }
+  }
+}

@@ -1,0 +1,48 @@
+{
+  /* Proyecto de TypeScript para las Vercel Functions de api/.
+     Existe como proyecto aparte porque ese código corre en un mundo distinto al
+     del navegador: sin DOM, sin JSX, y con acceso a process.env y a los módulos
+     de Node. Sin este archivo, "tsc -b" ni siquiera miraría la carpeta api/ y
+     los errores de tipos ahí recién aparecerían en producción. */
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.api.tsbuildinfo",
+    "target": "es2023",
+    /* Sin "DOM": esto no corre en un navegador. Request y Response no vienen de
+       ahí — los aporta @types/node, porque Node los expone como globales desde
+       la v18. */
+    "lib": ["ES2023"],
+    "types": ["node"],
+    "skipLibCheck": true,
+
+    /* "nodenext" y NO "bundler", aunque Vercel empaquete la función.
+
+       El motivo es concreto: este código corre como ESM real de Node, donde los
+       imports relativos EXIGEN la extensión del archivo. Con "bundler",
+       TypeScript acepta un import sin extensión, el lint lo acepta, el CI pasa
+       en verde... y la función explota en producción con ERR_MODULE_NOT_FOUND.
+
+       Eso ya pasó una vez en este proyecto (corregido a mano en el commit
+       776962a). Con "nodenext", tsc rechaza el import incompleto y el error se
+       detecta al escribirlo, no al desplegarlo. */
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+
+    /* Linting */
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "erasableSyntaxOnly": true,
+    "noFallthroughCasesInSwitch": true,
+
+    /* Strictness: mismo nivel que el resto del proyecto. El código del servidor
+       es el que toca los secretos; relajar los chequeos justo acá sería al revés
+       de lo razonable. */
+    "strict": true,
+    "forceConsistentCasingInFileNames": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true
+  },
+  "include": ["api"]
+}

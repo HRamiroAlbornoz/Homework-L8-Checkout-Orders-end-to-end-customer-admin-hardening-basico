@@ -1,0 +1,1165 @@
+/* Paleta y variables: tema claro por defecto, oscuro vía prefers-color-scheme */
+:root {
+  --text: #2b2b33;
+  --text-muted: #6b6375;
+  --text-h: #08060d;
+  --bg: #fdfdfd;
+  --surface: #ffffff;
+  --border: #e0e0e6;
+  --accent: #7b3ff2;
+  --accent-contrast: #ffffff;
+  --error-bg: #fdecec;
+  --error-text: #7a1616;
+  --error-border: #e5a3a3;
+  --surface-raised: #ffffff;
+  --accent-soft: rgba(123, 63, 242, 0.1);
+  --shadow-card: 0 8px 24px rgba(43, 43, 51, 0.08);
+  --header-bg: rgba(255, 255, 255, 0.85);
+
+  font: 16px/1.5 system-ui, "Segoe UI", Roboto, sans-serif;
+  color-scheme: light dark;
+  color: var(--text);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --text: #e4e4e7;
+    --text-muted: #9ca3af;
+    --text-h: #f3f4f6;
+    --bg: #16171d;
+    --surface: #1f2028;
+    --border: #2e303a;
+    --accent: #c084fc;
+    --accent-contrast: #16171d;
+    --error-bg: #3a1f1f;
+    --error-text: #f3b4b4;
+    --error-border: #6b2c2c;
+    --surface-raised: #262832;
+    --accent-soft: rgba(192, 132, 252, 0.14);
+    --shadow-card: 0 8px 24px rgba(0, 0, 0, 0.35);
+    --header-bg: rgba(31, 32, 40, 0.85);
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+h1 {
+  color: var(--text-h);
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  margin: 0 0 16px;
+}
+
+/* Foco visible siempre: nunca outline:none sin un reemplazo equivalente */
+:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Layout base: mobile-first (320px), más aire en tablet/desktop */
+.products-page {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 16px;
+}
+
+@media (min-width: 768px) {
+  .products-page {
+    padding: 24px;
+  }
+}
+
+@media (min-width: 1024px) {
+  .products-page {
+    padding: 32px 40px;
+  }
+}
+
+/* Mismo padding/max-width que .products-page, para páginas de contenido
+   simple (placeholders de Cart/Checkout/Admin, 404) que hoy no tienen
+   ningún contenedor: sin esto, el texto queda pegado al borde de la
+   pantalla. Se mantiene aparte de .products-page (no se reutiliza esa
+   clase acá) porque .products-page ya tiene semántica propia (sus hijos
+   __filters); esta es una clase neutra para páginas simples. */
+.page {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 16px;
+}
+
+@media (min-width: 768px) {
+  .page {
+    padding: 24px;
+  }
+}
+
+@media (min-width: 1024px) {
+  .page {
+    padding: 32px 40px;
+  }
+}
+
+.products-page__filters {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+@media (min-width: 768px) {
+  .products-page__filters {
+    flex-direction: row;
+    align-items: flex-end;
+  }
+}
+
+.search-bar,
+.category-filter {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.search-bar label,
+.category-filter label {
+  font-size: 14px;
+  color: var(--text-muted);
+}
+
+.search-bar input,
+.category-filter select {
+  min-height: 44px; /* área táctil mínima en mobile */
+  padding: 8px 12px;
+  font-size: 16px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+/* Placeholder sin estilizar = gris fijo del navegador, que en modo oscuro
+   da un contraste insuficiente (3.5:1) contra --surface. --text-muted ya
+   pasa WCAG AA en ambos temas (5.7:1 claro, 6.4:1 oscuro). El "opacity: 1"
+   es necesario porque Firefox reduce la opacidad del placeholder por
+   default, aunque el color ya sea explícito. */
+.search-bar input::placeholder {
+  color: var(--text-muted);
+  opacity: 1;
+}
+
+/* Las <option> no heredan el fondo del <select>: por defecto son
+   transparentes, así que el navegador cae en su fondo nativo (casi siempre
+   claro, sin importar el tema de la página) mientras el texto ya usa
+   --text, claro en modo oscuro. Resultado: texto claro sobre fondo claro,
+   invisible salvo que el highlight nativo del hover lo tape. Fijar el
+   fondo acá resuelve el contraste en ambos temas. */
+.category-filter select option {
+  background-color: var(--surface);
+  color: var(--text);
+}
+
+.search-bar input:hover,
+.category-filter select:hover {
+  border-color: var(--accent);
+}
+
+.search-bar input:focus,
+.category-filter select:focus {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .search-bar input,
+  .category-filter select {
+    transition: none;
+  }
+}
+
+.search-bar {
+  flex: 1;
+}
+
+/* Estados: loading / empty / error */
+.state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 40px 16px;
+  text-align: center;
+  color: var(--text-muted);
+}
+
+.state--error {
+  background: var(--error-bg);
+  color: var(--error-text);
+  border: 1px solid var(--error-border);
+  border-radius: 8px;
+}
+
+.state--error button {
+  min-height: 44px;
+  padding: 8px 20px;
+  border: none;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--accent-contrast);
+  font-size: 16px;
+  cursor: pointer;
+}
+
+.spinner {
+  width: 28px;
+  height: 28px;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation: none;
+    border-top-color: var(--border);
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Grid del catálogo: se acomoda solo según el ancho disponible */
+.product-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+.product-card {
+  /* Columna flexible para poder anclar el botón al fondo (ver .add-to-cart).
+     El grid ya iguala la ALTURA de las tarjetas de una misma fila, pero sin
+     esto el contenido interno queda desalineado: un nombre que ocupa dos
+     líneas empuja hacia abajo todo lo que sigue, y los botones de una fila
+     terminan a distintas alturas. */
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+  background: var(--surface);
+  transition: border-color 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.product-card:hover {
+  border-color: var(--accent);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-card);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .product-card {
+    transition: none;
+  }
+}
+
+.product-card__name {
+  margin: 0 0 4px;
+  font-size: 17px;
+  color: var(--text-h);
+}
+
+/* Cuando el producto NO tiene precio, la categoría es el último elemento antes
+   del mensaje "Precio no disponible", así que le toca a ella aportar el colchón
+   de 12px que en las demás tarjetas da el margin-bottom del precio.
+
+   No puede ir como margin-top del mensaje: ese margen usa "auto" para anclarlo
+   al fondo, y cuando la tarjeta es la más alta de su fila el "auto" se resuelve
+   en 0 y deja de separar. Tampoco sirve un padding-top en el mensaje: con
+   box-sizing: border-box, el min-height de 44px absorbe ese padding y el texto
+   solo se corre hacia adentro de la misma caja, sin separarla de nada.
+
+   :has() acota la regla a las tarjetas sin precio, para no alterar el espaciado
+   de las demás. */
+.product-card:has(.add-to-cart__unavailable) .product-card__category {
+  margin-bottom: 12px;
+}
+
+.product-card__category {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.product-card__price {
+  /* El margen inferior vive acá y no como margin-top del botón, porque ese
+     usa "auto" para empujarse al fondo y no puede fijar además una distancia
+     mínima. Así el precio nunca queda pegado al botón, ni siquiera en la
+     tarjeta más alta de la fila. */
+  margin: 0 0 12px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-weight: 600;
+}
+
+.product-card__price::before {
+  content: "🏷" / "";
+  font-size: 14px;
+  line-height: 1;
+}
+
+.load-more-button {
+  display: block;
+  margin: 0 auto;
+  min-height: 44px;
+  padding: 8px 24px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--accent);
+  font-size: 16px;
+  cursor: pointer;
+  transition: opacity 0.15s ease, transform 0.05s ease;
+}
+
+.load-more-button:hover:not(:disabled) {
+  opacity: 0.8;
+}
+
+.load-more-button:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.load-more-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .load-more-button {
+    transition: none;
+  }
+
+  .load-more-button:active:not(:disabled) {
+    transform: none;
+  }
+}
+
+/* Header: barra sticky con blur, marca con ícono de etiqueta (vía ::before,
+   nunca como texto real — no debe afectar el nombre accesible del link). */
+.site-header {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--header-bg);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--border);
+}
+
+.site-header__nav {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 12px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+@media (min-width: 768px) {
+  .site-header__nav {
+    padding: 14px 24px;
+  }
+}
+
+.site-header__brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  /* 44px es el área táctil mínima recomendada: por debajo de eso, un dedo
+     falla el objetivo seguido. El texto mide 27px de alto, así que el min-height
+     agranda la zona sensible SIN agrandar la tipografía. */
+  min-height: 44px;
+  font-weight: 700;
+  font-size: 18px;
+  letter-spacing: -0.02em;
+  color: var(--text-h);
+  text-decoration: none;
+}
+
+.site-header__brand::before {
+  content: "🏷" / "";
+  font-size: 16px;
+  line-height: 1;
+}
+
+.site-header__links {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.site-header__link {
+  position: relative;
+  /* Mismo criterio que la marca: inline-flex + min-height agrandan el área
+     táctil a 44px sin tocar el tamaño del texto. */
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.site-header__link::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  /* El subrayado se ancla al TEXTO, no al borde inferior de la caja táctil.
+     Sin este cálculo quedaría flotando ~10px por debajo de las letras, como un
+     trazo suelto. Se expresa en "em" para que siga al texto si cambia su
+     tamaño, en vez de fijar un número de píxeles que habría que recalcular. */
+  bottom: calc(50% - 0.8em);
+  width: 100%;
+  height: 2px;
+  background: var(--accent);
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform 0.15s ease;
+}
+
+.site-header__link:hover::after,
+.site-header__link:focus-visible::after {
+  transform: scaleX(1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .site-header__link::after {
+    transition: none;
+  }
+}
+
+.site-header__user {
+  font-size: 14px;
+  color: var(--text-muted);
+}
+
+.site-header__logout {
+  min-height: 44px;
+  padding: 6px 16px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font-size: 14px;
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.site-header__logout:hover:not(:disabled) {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.site-header__logout:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .site-header__logout {
+    transition: none;
+  }
+}
+
+.site-header__error {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 8px 16px 12px;
+  color: var(--error-text);
+  font-size: 14px;
+}
+
+/* Campos de los formularios de auth (login/signup) */
+.form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 16px;
+}
+
+.form-field__label {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.form-field__input {
+  min-height: 44px;
+  padding: 8px 12px;
+  font-size: 16px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.form-field__input:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.form-field__input:focus {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.form-field__input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.form-field__input[aria-invalid="true"] {
+  border-color: var(--error-border);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .form-field__input {
+    transition: none;
+  }
+}
+
+.form-field__error {
+  font-size: 13px;
+  color: var(--error-text);
+}
+
+/* Formularios de auth (login/signup): banner de error y botón de submit */
+.auth-form__error {
+  margin: 0 0 16px;
+  padding: 10px 12px;
+  background: var(--error-bg);
+  color: var(--error-text);
+  border: 1px solid var(--error-border);
+  border-radius: 6px;
+  font-size: 14px;
+}
+
+.auth-form__submit {
+  width: 100%;
+  min-height: 44px;
+  padding: 10px 20px;
+  border: none;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--accent-contrast);
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.15s ease, transform 0.05s ease;
+}
+
+.auth-form__submit:hover:not(:disabled) {
+  opacity: 0.92;
+}
+
+.auth-form__submit:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.auth-form__submit:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .auth-form__submit {
+    transition: none;
+  }
+
+  .auth-form__submit:active:not(:disabled) {
+    transform: none;
+  }
+}
+
+/* Login/Signup: un solo card centrado (no split-screen), con el ícono de
+   etiqueta reutilizado como acento decorativo en la esquina. */
+.auth-page {
+  /* Antes: calc(100vh - 64px), una resta que asumía una altura fija del
+     Header que en realidad varía según breakpoint/contenido. El centrado
+     flex ya centra la card correctamente contra el viewport completo (y la
+     página igual scrollea si el contenido es alto), así que la resta no
+     resolvía ningún problema real. dvh (dynamic viewport height) además
+     evita el salto de layout que causa 100vh en mobile cuando aparece o
+     desaparece la barra de direcciones del navegador. */
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 16px;
+}
+
+.auth-card {
+  position: relative;
+  width: 100%;
+  max-width: 420px;
+  padding: 32px 24px;
+  background: var(--surface-raised);
+  border-radius: 12px;
+  box-shadow: var(--shadow-card);
+  animation: auth-card-in 0.15s ease-out;
+}
+
+@media (min-width: 768px) {
+  .auth-card {
+    padding: 40px 32px;
+  }
+}
+
+.auth-card::before {
+  content: "🏷" / "";
+  position: absolute;
+  top: -14px;
+  left: 24px;
+  font-size: 20px;
+  line-height: 1;
+  background: var(--accent-soft);
+  border-radius: 999px;
+  padding: 6px;
+}
+
+@keyframes auth-card-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .auth-card {
+    animation: none;
+  }
+}
+
+.auth-card__title {
+  margin-bottom: 20px;
+}
+
+.auth-card__error {
+  margin: 0 0 16px;
+  padding: 10px 12px;
+  background: var(--error-bg);
+  color: var(--error-text);
+  border: 1px solid var(--error-border);
+  border-radius: 6px;
+  font-size: 14px;
+}
+
+.auth-card__footer {
+  margin: 16px 0 0;
+  font-size: 14px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+/* Los links "Registrate"/"Iniciá sesión" nunca tuvieron className propio,
+   así que caían en el azul subrayado por defecto del navegador en vez de
+   la paleta violeta del proyecto. */
+.auth-card__footer a {
+  color: var(--accent);
+  font-weight: 600;
+  /* El link va dentro de una frase ("¿Ya tenés cuenta? Iniciá sesión"), así que
+     no puede crecer a 44px de alto sin romper el renglón. El padding expande la
+     zona sensible por arriba y por abajo —de 19px a 45px— y el margen negativo
+     devuelve el espacio ocupado, para que la línea se siga viendo igual.
+     Es la forma de agrandar un objetivo táctil sin mover el diseño. */
+  display: inline-block;
+  padding: 13px 6px;
+  margin: -13px 0;
+}
+
+/* ---------------------------------------------------------------------------
+   Carrito
+   --------------------------------------------------------------------------- */
+
+/* Botón "Agregar al carrito" de cada tarjeta del catálogo. min-height de 44px
+   para cumplir el área táctil mínima en mobile: un botón más chico es difícil
+   de acertar con el dedo. */
+.add-to-cart {
+  width: 100%;
+  min-height: 44px;
+  /* "auto" absorbe todo el espacio libre que quede por encima, anclando el
+     botón al fondo de la tarjeta. Es lo que alinea los botones de una misma
+     fila aunque los nombres ocupen distinta cantidad de líneas. */
+  margin-top: auto;
+  padding: 8px 16px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--accent-contrast);
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.15s ease, transform 0.05s ease;
+}
+
+.add-to-cart:hover {
+  opacity: 0.85;
+}
+
+.add-to-cart:active {
+  transform: scale(0.98);
+}
+
+/* Mensaje para productos sin precio cargado. Ocupa el mismo alto que el botón
+   para que las tarjetas de una misma fila no queden desalineadas. */
+.add-to-cart__unavailable {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  /* Mismo anclaje al fondo que el botón: así una tarjeta sin precio queda
+     alineada con las que sí lo tienen. */
+  margin: auto 0 0;
+  color: var(--text-muted);
+  font-size: 14px;
+  font-style: italic;
+}
+
+/* Contador del carrito en el header. */
+.cart-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 0 8px;
+  color: var(--text);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.cart-badge:hover {
+  color: var(--accent);
+}
+
+/* El número se muestra en una píldora con el color de acento. El contraste
+   accent/accent-contrast ya está validado en el resto de la app. */
+.cart-badge__count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  height: 24px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-contrast);
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .add-to-cart {
+    transition: none;
+  }
+
+  .add-to-cart:active {
+    transform: none;
+  }
+}
+
+/* Página del carrito */
+.cart-page__items {
+  list-style: none;
+  margin: 24px 0;
+  padding: 0;
+  display: grid;
+  gap: 12px;
+}
+
+.cart-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding: 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.cart-item__info {
+  flex: 1 1 180px;
+}
+
+.cart-item__name {
+  margin: 0;
+  font-size: 16px;
+  color: var(--text-h);
+}
+
+.cart-item__unit-price {
+  margin: 4px 0 0;
+  font-size: 14px;
+  color: var(--text-muted);
+}
+
+.cart-item__subtotal {
+  margin: 0;
+  min-width: 96px;
+  text-align: right;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.cart-item__remove {
+  min-height: 44px;
+  padding: 8px 16px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.cart-item__remove:hover {
+  color: var(--error-text);
+  border-color: var(--error-border);
+}
+
+/* Selector de cantidad */
+.quantity-selector {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.quantity-selector__button {
+  width: 44px;
+  height: 44px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-raised);
+  color: var(--text);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.quantity-selector__button:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.quantity-selector__button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.quantity-selector__value {
+  min-width: 32px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Resumen y acciones */
+.cart-page__summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.cart-page__total {
+  margin: 0;
+  font-size: 18px;
+}
+
+.cart-page__checkout-link,
+.cart-page__confirm-yes {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 8px 24px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--accent-contrast);
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.cart-page__back-link {
+  /* Igual que el resto de los enlaces de navegación: 44px de área táctil.
+     Está solo en su línea, así que puede crecer sin afectar al diseño. */
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.cart-page__clear,
+.cart-page__confirm-no {
+  min-height: 44px;
+  margin-top: 16px;
+  padding: 8px 16px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.cart-page__confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-top: 16px;
+  padding: 16px;
+  background: var(--error-bg);
+  border: 1px solid var(--error-border);
+  border-radius: 8px;
+  color: var(--error-text);
+}
+
+.cart-page__confirm p {
+  flex: 1 1 100%;
+  margin: 0;
+}
+
+/* Checkout */
+.checkout__items {
+  list-style: none;
+  margin: 24px 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.checkout__item {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.checkout__total {
+  margin: 0 0 16px;
+  font-size: 18px;
+}
+
+.checkout__submit {
+  min-height: 44px;
+  padding: 8px 24px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--accent-contrast);
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.checkout__submit:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.checkout__error {
+  margin: 0 0 16px;
+  padding: 12px 16px;
+  background: var(--error-bg);
+  color: var(--error-text);
+  border: 1px solid var(--error-border);
+  border-radius: 6px;
+}
+
+.checkout__confirmation {
+  padding: 16px;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+/* Fila con el botón de confirmar y el enlace de vuelta al carrito.
+   flex-wrap: en una pantalla angosta las dos acciones no entran lado a lado y
+   el enlace baja a su propia línea, en vez de encogerse hasta partir el texto.
+   gap reemplaza a los márgenes: separa los elementos entre sí sin importar
+   cuál de los dos quede primero cuando el contenido se reacomoda. */
+.checkout__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+}
+
+/* Dentro de la fila, el gap ya se ocupa de la separación. El margen propio del
+   enlace (que sí hace falta cuando aparece solo, en la confirmación y en el
+   carrito vacío) lo desalinearía verticalmente respecto del botón. */
+.checkout__actions .checkout__back-link {
+  margin-top: 0;
+}
+
+.checkout__back-link {
+  /* inline-flex + min-height: mismo criterio de área táctil que el resto. */
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  margin-top: 16px;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* Panel de administración: una columna angosta, centrada como bloque.
+   .page mide 1100px, pensado para una grilla de productos. El panel tiene una
+   sola tarjeta de formulario, así que con ese ancho el <h1> se estiraba a lo
+   largo de toda la pantalla y dejaba media página vacía al costado.
+   Se acota la COLUMNA y no la tarjeta: si se centrara solo la tarjeta, el
+   título seguiría arrancando en el borde izquierdo y cada elemento quedaría en
+   un eje distinto. Acotando la columna, los dos comparten el mismo borde y el
+   conjunto se centra gracias al "margin: 0 auto" que .page ya trae. */
+.admin-page {
+  max-width: 560px;
+}
+
+/* Formulario de alta de productos (panel de administración) */
+.create-product-form {
+  /* Sin max-width propio: la tarjeta ocupa todo el ancho de .admin-page. Así
+     queda siempre alineada con el <h1> en cualquier breakpoint, en vez de
+     depender de que dos anchos fijos coincidan con el padding de turno. */
+  margin-top: 24px;
+  padding: 24px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.create-product-form h2 {
+  margin-top: 0;
+}
+
+.create-product-form__submit {
+  width: 100%;
+  min-height: 44px;
+  margin-top: 8px;
+  padding: 8px 24px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--accent-contrast);
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.create-product-form__submit:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.create-product-form__error {
+  margin: 16px 0 0;
+  padding: 12px 16px;
+  background: var(--error-bg);
+  color: var(--error-text);
+  border: 1px solid var(--error-border);
+  border-radius: 6px;
+}
+
+.create-product-form__success {
+  margin-top: 16px;
+  padding: 16px;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.create-product-form__preview {
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
+}
+
+/* Imagen del producto en la tarjeta del catálogo. aspect-ratio + object-fit
+   mantienen todas las tarjetas de la misma altura sin deformar la imagen: sin
+   esto, una foto vertical y una apaisada romperían la alineación de la grilla. */
+.product-card__image {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+  border-radius: 6px;
+  margin-bottom: 12px;
+  background: var(--surface-raised);
+}
+
+/* Página 404 */
+.not-found__message {
+  max-width: 60ch;
+  margin: 0 0 16px;
+  color: var(--text-muted);
+}
+
+.not-found__link {
+  /* inline-flex + min-height: mismo criterio de área táctil que el resto de los
+     enlaces de navegación. Acá el link está solo en su línea, así que puede
+     crecer sin afectar a nada. */
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  color: var(--accent);
+  font-weight: 600;
+}

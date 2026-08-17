@@ -1,0 +1,72 @@
+# Integración continua: corre las mismas verificaciones que hacés en tu máquina,
+# pero en una máquina limpia de GitHub, en cada push y en cada pull request.
+#
+# Por qué importa que sea una máquina limpia: en tu computadora los tests pueden
+# pasar por cosas que no están en el repositorio — un paquete instalado a mano
+# hace meses, un archivo .env con valores, una carpeta node_modules con restos de
+# otra rama. Si la suite pasa acá, pasa para cualquiera que clone el proyecto.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Si se pushean dos commits seguidos a la misma rama, cancela la corrida vieja en
+# vez de dejar las dos compitiendo. El resultado de la anterior ya no le importa
+# a nadie, y los minutos de ejecución son un recurso finito.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar el código
+        # v5 y no v4: las acciones en v4 corren sobre Node 20, que GitHub está
+        # retirando de sus runners. Mientras tanto las fuerza a correr en Node 24
+        # y avisa en cada ejecución; actualizar evita que un día dejen de andar.
+        uses: actions/checkout@v5
+
+      - name: Preparar Node
+        uses: actions/setup-node@v5
+        with:
+          # Misma versión mayor que se usa en desarrollo. Fijarla evita el
+          # clásico "en mi máquina anda": si acá corriera otra versión, un error
+          # de compatibilidad aparecería solo en uno de los dos lados.
+          node-version: '24'
+          # Guarda el cache de npm entre corridas. Sin esto, cada ejecución
+          # descarga todas las dependencias de cero.
+          cache: 'npm'
+
+      - name: Instalar dependencias
+        # "npm ci" y no "npm install": instala EXACTAMENTE las versiones del
+        # package-lock.json y falla si el lock no coincide con el package.json.
+        # "npm install" podría actualizar versiones por su cuenta, y entonces el
+        # CI estaría probando dependencias distintas a las que tenés vos.
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Verificación de tipos
+        # Cubre src/, scripts/ y api/ (los tres proyectos referenciados en
+        # tsconfig.json). El build también corre tsc, pero tenerlo como paso
+        # propio hace que el reporte diga "fallan los tipos" en vez de
+        # "falla el build".
+        run: npx tsc -b --noEmit
+
+      - name: Tests
+        # No necesita ninguna variable de entorno ni acceso a internet: todo lo
+        # externo está mockeado (Firebase con vi.mock, las requests HTTP con
+        # MSW). Si algún día un test intentara salir a la red de verdad, MSW lo
+        # cortaría con onUnhandledRequest: "error" y este paso fallaría — que es
+        # exactamente lo que queremos que pase.
+        run: npm run test
+
+      - name: Build de producción
+        # Último paso a propósito: es el más lento, y no tiene sentido esperarlo
+        # para enterarse de un error de lint que se detecta en segundos.
+        run: npm run build

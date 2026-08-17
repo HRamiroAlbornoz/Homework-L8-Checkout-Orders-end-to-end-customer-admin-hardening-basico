@@ -1,0 +1,44 @@
+{
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.app.tsbuildinfo",
+    "target": "es2023",
+    "lib": ["ES2023", "DOM"],
+    "module": "esnext",
+    /* "vitest/globals" declara los tipos de describe/it/expect/vi como globales,
+       para que coincida con "globals: true" en vite.config.ts. Sin esto, un test
+       que no importe describe explícitamente compila en Vitest pero falla en
+       "tsc -b" (y por lo tanto en "npm run build" y en el CI). */
+    "types": ["vite/client", "vitest/globals"],
+    "allowArbitraryExtensions": true,
+    "skipLibCheck": true,
+
+    /* Bundler mode */
+    "moduleResolution": "bundler",
+    /* Contraparte del alias "@" de vite.config.ts. Vite resuelve el alias al
+       construir el bundle, pero TypeScript no lee vite.config.ts: necesita que
+       se lo declaremos acá aparte. Si solo se configura uno de los dos, el
+       síntoma es engañoso — la app arranca bien pero el editor marca todos los
+       imports en rojo, o al revés. */
+    "paths": {
+      "@/*": ["./src/*"]
+    },
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "jsx": "react-jsx",
+
+    /* Linting */
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "erasableSyntaxOnly": true,
+    "noFallthroughCasesInSwitch": true,
+
+    /* Strictness (regla obligatoria del proyecto: nunca "any", siempre strict) */
+    "strict": true,
+    "forceConsistentCasingInFileNames": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true
+  },
+  "include": ["src"]
+}
