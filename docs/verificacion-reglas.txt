@@ -1,6 +1,8 @@
 
 Verificación de las reglas de Firestore
 
+Producto usado en las pruebas: Nike Tech Fleece Buzo ($ 27290)
+
 --- COMO CLIENTE ---
 OK   | esperado: permitido  | real: permitido        | lee su propia orden
 OK   | esperado: rechazado  | real: rechazado        | lee una orden AJENA
@@ -11,7 +13,11 @@ OK   | esperado: rechazado  | real: rechazado        | crea una orden a nombre d
 OK   | esperado: rechazado  | real: rechazado        | crea una orden ya marcada como completada
 OK   | esperado: rechazado  | real: rechazado        | crea una orden con un campo inventado
 OK   | esperado: rechazado  | real: rechazado        | crea una orden con fecha propia en vez de la del servidor
-OK   | esperado: permitido  | real: permitido        | crea una orden con items que no son objetos (límite conocido de las reglas)
+OK   | esperado: rechazado  | real: rechazado        | compra a un precio inventado, más barato que el del catálogo
+OK   | esperado: rechazado  | real: rechazado        | declara un total que no coincide con sus líneas
+OK   | esperado: rechazado  | real: rechazado        | compra un producto que no existe en el catálogo
+OK   | esperado: rechazado  | real: rechazado        | crea una orden con items que no son objetos
+OK   | esperado: rechazado  | real: rechazado        | crea una orden con más ítems de los que las reglas pueden verificar
 OK   | esperado: rechazado  | real: rechazado        | borra su propia orden
 
 --- COMO ADMINISTRADOR ---
@@ -29,6 +35,6 @@ OK   | esperado: rechazado  | real: rechazado        | borra una orden
 OK   | esperado: permitido  | real: permitido        | lleva la orden a un estado terminal
 OK   | esperado: rechazado  | real: rechazado        | saca la orden de un estado terminal
 
-Órdenes de prueba eliminadas: 3
+Órdenes de prueba eliminadas: 2
 
-24 pruebas — 0 fallaron
+28 pruebas — 0 fallaron

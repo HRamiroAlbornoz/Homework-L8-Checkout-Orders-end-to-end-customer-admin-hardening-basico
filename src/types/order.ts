@@ -2,12 +2,20 @@ import { z } from "zod";
 import { Timestamp } from "firebase/firestore";
 import { MAX_QUANTITY_PER_ITEM } from "@/features/cart/cartConstants";
 
-// Tope de líneas distintas por orden. No hay ningún requisito de negocio detrás:
-// es una defensa. Sin un máximo, alguien que llame al SDK desde la consola del
-// navegador podría escribir una orden con 10.000 ítems, acercándose al límite de
-// 1 MB por documento de Firestore y encareciendo cada lectura del historial.
-// El mismo número se repite en firestore.rules, que es donde se aplica de verdad.
-export const MAX_ITEMS_PER_ORDER = 50;
+// Tope de líneas distintas por orden.
+//
+// ⚠ ESTE NÚMERO NO SE PUEDE SUBIR SIN ROMPER LAS REGLAS DE FIRESTORE.
+//
+// Las reglas verifican el precio de cada ítem contra el catálogo con un get(),
+// y Firestore permite un MÁXIMO DE 10 llamadas a get() por request de un solo
+// documento. Con 10 ítems distintos estamos exactamente en el límite: una orden
+// de 11 sería rechazada por la plataforma, no por esta constante.
+//
+// El tope se aplica de verdad en firestore.rules; acá está para que el checkout
+// falle antes, con un mensaje que explica qué pasa, en vez de recibir un
+// permission-denied genérico. Si algún día hiciera falta subirlo, hay que mover
+// la creación de órdenes a un camino de servidor que no dependa de las reglas.
+export const MAX_ITEMS_PER_ORDER = 10;
 
 // Largo máximo del nombre del producto guardado en el snapshot. Coincide con el
 // límite que firestore.rules ya aplica a products.name.
@@ -62,13 +70,23 @@ export type OrderItemSnapshot = z.infer<typeof orderItemSnapshotSchema>;
 // lo que impedía comprar más barato editando el localStorage.
 //
 // El contrato de esta homework exige el modelo opuesto: items[] y total dentro
-// del documento de la orden. Se adopta ese modelo, y hay que ser explícito sobre
-// lo que cuesta: al volver a un array, esa verificación de precio deja de ser
-// posible. Las reglas siguen validando la FORMA (tipos, cantidad de ítems,
-// rangos), pero ya no pueden contrastar el precio contra products.
+// del documento de la orden.
 //
-// Es un trade-off consciente, no un descuido. Queda documentado en
-// docs/ai-notes.md junto con la alternativa descartada.
+// La primera versión de esta rama adoptó ese modelo dando por perdida la
+// verificación del precio. Una revisión de seguridad mostró que eso no era una
+// limitación aceptable sino un agujero explotable: cualquier cliente podía
+// escribir su propio precio desde la consola del navegador y comprar a lo que
+// quisiera. Se comprobó contra Firestore real.
+//
+// La verificación se recuperó SIN abandonar el modelo del contrato. Las reglas
+// no pueden recorrer un array, pero sí acceder a una posición concreta
+// (items[0], items[1], …), que es lo que la documentación oficial recomienda
+// para validar listas. firestore.rules desenrolla esa comprobación de la
+// posición 0 a la 9 y contrasta cada precio contra products.
+//
+// De ahí sale el tope de 10 de MAX_ITEMS_PER_ORDER: Firestore permite un máximo
+// de 10 llamadas a get() por request de un solo documento, y cada ítem consume
+// una. No es una preferencia, es el techo de la plataforma.
 // ============================================================================
 
 // Validador de Timestamp de Firestore.

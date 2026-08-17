@@ -7,7 +7,7 @@ Construido sobre la base del proyecto anterior ([L7 — Release Candidate del E-
 | | |
 |---|---|
 | Tests | 524 en 28 archivos |
-| Pruebas de reglas | 24 contra Firestore real ([resultado](docs/verificacion-reglas.txt)) |
+| Pruebas de reglas | 28 contra Firestore real ([resultado](docs/verificacion-reglas.txt)) |
 | CI | Lint, type-check, tests y build en cada push y PR |
 | Decisiones y uso de IA | [`docs/ai-notes.md`](docs/ai-notes.md) |
 
@@ -47,18 +47,25 @@ pending ──────► processing ──────► completed   (term
 
 Definidas una sola vez en [`orderTransitions.ts`](src/features/orders/orderTransitions.ts) y **replicadas en las reglas**. La duplicación es deliberada: deshabilitar una opción en el `<select>` ayuda al usuario honesto, pero no detiene a nadie que llame al SDK desde la consola del navegador.
 
-### ⚠ Lo que las reglas no pueden verificar
+### El precio se verifica contra el catálogo, en el servidor
 
-El lenguaje de las reglas de Firestore **no permite recorrer un array**. Con los ítems embebidos en el documento —que es lo que exige el contrato del enunciado— no hay forma de comprobar la forma de cada ítem, ni contrastar su precio contra el catálogo, ni verificar que `total` sea la suma de las líneas.
+Las reglas de Firestore **no pueden recorrer un array** —no hay bucles ni `map`/`reduce`—, pero **sí pueden acceder a una posición concreta** con notación de corchetes, que es lo que la [documentación oficial](https://firebase.google.com/docs/firestore/security/rules-fields) recomienda para validar listas.
 
-El proyecto anterior guardaba cada ítem como un documento propio en una subcolección justamente para poder verificar el precio con un `get()`. Ese modelo cerraba un agujero que este reabre. **Es un trade-off consciente**, no un descuido, y está documentado en [`docs/ai-notes.md`](docs/ai-notes.md#el-punto-donde-se-rechazó-el-contrato-del-enunciado-y-se-aceptó-igual).
+`firestore.rules` desenrolla esa comprobación de la posición 0 a la 9:
 
-Dos mitigaciones, ninguna de las cuales cierra el agujero:
+```
+items[i].priceAtPurchase == precioDeCatalogo(items[i].productId)
+```
 
-- El service **recalcula** el total a partir de los ítems en vez de copiar el del carrito, así que al menos no se guarda un total incoherente con las líneas de la propia orden.
-- Los listados **omiten** los documentos que no superan la validación en vez de romperse. Sin eso, una orden con `items` basura —que las reglas aceptan— dejaría el historial y el panel inutilizables de forma permanente, porque las órdenes tampoco se pueden borrar.
+Cada ítem se contrasta contra `products/{productId}`, y el `total` contra la suma de las líneas. **Manipular el `localStorage` para comprar más barato no funciona**, y tampoco inventar un producto o declarar un total que no corresponde.
 
-El límite está verificado como tal: `npm run verify:rules` incluye un caso que **espera "permitido"** al escribir `items: [1, 2, 3]`. Si algún día pasa a dar "rechazado", significará que las reglas ganaron capacidad de validar arrays.
+> **De dónde sale el tope de 10 ítems.** Firestore permite un máximo de **10 llamadas a `get()` por request de un solo documento**, y cada ítem consume una. No es una preferencia de diseño: es el techo de la plataforma. Por eso `MAX_ITEMS_PER_ORDER = 10` y por eso no se puede agregar ningún `get()` más a la regla de creación —ni siquiera un `isAdmin()`— sin bajar antes el tope.
+
+Esto **recupera** la protección que tenía el proyecto anterior con una subcolección, sin abandonar el modelo `items[]` embebido que exige el contrato. La primera versión de esta rama la había dado por perdida; una revisión de seguridad mostró que no era una limitación aceptable sino un agujero explotable. La historia completa está en [`docs/ai-notes.md`](docs/ai-notes.md).
+
+**Efecto secundario aceptado:** si un administrador cambia el precio de un producto, los carritos que ya lo tenían dejan de poder confirmarse. Es el costo de verificar contra el catálogo, y el checkout lo maneja con un mensaje de error.
+
+**Lo que sigue sin poder verificarse:** la comparación del total lleva una tolerancia de un centavo, porque el cliente redondea cada línea a dos decimales y las reglas no tienen función de redondeo. No habilita ningún abuso: cada precio ya está verificado.
 
 ## Qué incluye
 
@@ -132,7 +139,7 @@ El límite está verificado como tal: `npm run verify:rules` incluye un caso que
 | `npm run test` | Suite completa de Vitest |
 | `npm run lint` | ESLint sobre todo el repositorio |
 | `npm run seed` | Carga productos de prueba (no hace nada si ya hay datos) |
-| `npm run verify:rules` | Ejecuta las 24 pruebas de las reglas contra Firestore real |
+| `npm run verify:rules` | Ejecuta las 28 pruebas de las reglas contra Firestore real |
 
 ## Rutas
 
@@ -155,7 +162,8 @@ Cada página declara su propio título con `useDocumentTitle`. Es obligatorio en
 
 ```
 create   cliente autenticado, solo a su nombre, siempre en 'pending',
-         con createdAt == request.time y sin campos de más
+         con createdAt == request.time, sin campos de más,
+         y con CADA ÍTEM verificado contra el precio del catálogo
 read     el dueño, o cualquier administrador
 update   solo administradores, solo 'status' y 'updatedAt',
          y solo si la transición es válida
@@ -172,7 +180,7 @@ delete   nunca
 npm run verify:rules
 ```
 
-Cubre los tres casos obligatorios del enunciado —un cliente no puede leer una orden ajena, un administrador sí puede cambiar el estado, y no puede tocar ningún otro campo— y veintiuno más, incluido el límite conocido de las reglas con los arrays.
+Cubre los tres casos obligatorios del enunciado —un cliente no puede leer una orden ajena, un administrador sí puede cambiar el estado, y no puede tocar ningún otro campo— y veinticinco más: precios inventados, totales que no cuadran, productos inexistentes, campos de más, fechas falseadas y transiciones inválidas.
 
 Crea dos órdenes de prueba y **las borra al terminar** con el SDK de Admin, dentro de un `finally`: las reglas prohíben el `delete` desde el cliente, así que sin esa limpieza cada corrida ensuciaría el historial real de forma permanente.
 
@@ -196,13 +204,13 @@ Una excepción deliberada: `orderConverter.test.ts` **no** mockea `firebase/fire
 - **Dos capas independientes** — `ProtectedRoute` / `AdminRoute` son UX; las reglas son la protección real contra un cliente malicioso.
 - **Fechas del servidor** — `createdAt` y `updatedAt` se escriben con `serverTimestamp()` y las reglas lo **exigen** (`== request.time`). Con el reloj del navegador, el orden cronológico del historial sería manipulable.
 - **Las órdenes no se borran** — deshacer una compra es una transición a `cancelled`, que deja rastro, no una eliminación que lo borra.
+- **Precio de las órdenes** — cada línea se compara contra el precio del catálogo dentro de las reglas, y el total contra la suma de las líneas. Manipular el `localStorage` para comprar más barato no funciona.
 - **Mensajes que no filtran información** — pedir una orden inexistente y pedir una ajena dan el **mismo** error. Distinguirlos permitiría probar ids al azar para averiguar cuáles corresponden a órdenes reales.
 
 ## Limitaciones conocidas
 
-- **Las reglas no pueden validar los elementos de un array.** Un usuario autenticado puede escribir desde la consola del navegador una orden con `items: [1, 2, 3]`: cumple todo lo que las reglas *sí* pueden comprobar (es una lista de entre 1 y 50 elementos) y se acepta. Está verificado contra Firestore real en `npm run verify:rules`, como caso que **espera "permitido"**.
-
-  La app se defiende del lado del cliente: los listados convierten documento por documento y **omiten** los inválidos, registrándolos en la consola. Sin esa defensa, ese único documento dejaría inutilizables el historial de ese cliente y el panel de administración **de forma permanente**, porque las reglas tampoco permiten borrar órdenes. La lectura de *una* orden puntual sigue siendo estricta y falla de forma visible: ahí un null se leería como "no existe" y ocultaría el problema.
+- **Un máximo de 10 productos distintos por orden.** Es el techo de `get()` de las reglas, no una decisión de producto. Un carrito con más de 10 líneas no se puede confirmar; el checkout lo detecta antes y lo explica. Subirlo exigiría mover la creación de órdenes a un camino de servidor.
+- **Los listados omiten los documentos que no superan la validación**, en vez de romperse. Con las reglas actuales no debería existir ninguno, pero la defensa se mantiene: si alguna vez se relajaran, un solo documento inválido dejaría el historial y el panel inutilizables de forma permanente, porque las órdenes tampoco se pueden borrar. La lectura de *una* orden puntual sigue siendo estricta y falla de forma visible: ahí un `null` se leería como "no existe" y ocultaría el problema.
 - **6 vulnerabilidades `moderate` sin resolver**, todas con la misma raíz: `uuid < 11.1.1`, que llega de forma transitiva a través de `firebase-admin`. Es una **devDependency** usada solo por `npm run seed`, así que nunca entra al bundle. No se aplica `npm audit fix --force` porque **degradaría** `firebase-admin` de `^14.2.0` a `10.3.0` — cuatro versiones mayores hacia atrás, con sus propios agujeros sin parchear, para tapar uno que no es alcanzable desde este código.
 - **Sin paginación en el panel de administración.** Con muchas órdenes, el listado global las trae todas. Fuera del alcance de esta homework.
 

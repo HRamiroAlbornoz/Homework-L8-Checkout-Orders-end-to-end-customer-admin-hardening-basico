@@ -12,6 +12,7 @@ import {
   setDoc,
   updateDoc,
   where,
+  limit,
   type Firestore,
 } from "firebase/firestore";
 import { cert, deleteApp as deleteAdminApp, initializeApp as initializeAdminApp } from "firebase-admin/app";
@@ -189,14 +190,59 @@ async function limpiarOrdenesDePrueba(ids: string[]): Promise<void> {
   }
 }
 
-/** Crea una orden mínima para el usuario en sesión y devuelve su id. */
-async function crearOrdenDePrueba(userId: string): Promise<string> {
+interface ProductoDeCatalogo {
+  id: string;
+  name: string;
+  price: number;
+}
+
+/**
+ * Trae un producto real del catálogo.
+ *
+ * @returns  id, nombre y precio de un producto existente.
+ * @throws   Error con un mensaje accionable si el catálogo está vacío.
+ *
+ * Hace falta porque las reglas ahora verifican el precio de cada ítem contra
+ * `products/{productId}` con un get(). Un productId inventado hace fallar ese
+ * get() y la orden se rechaza — que es exactamente lo que se busca, pero
+ * significa que las órdenes de prueba tienen que usar datos reales del catálogo.
+ */
+async function obtenerProductoDelCatalogo(): Promise<ProductoDeCatalogo> {
+  const resultado = await getDocs(query(collection(db, "products"), limit(1)));
+  const documento = resultado.docs[0];
+
+  if (!documento) {
+    throw new Error(
+      "El catálogo está vacío, así que no se puede armar una orden válida.\n" +
+        "Corré `npm run seed` antes de verificar las reglas.",
+    );
+  }
+
+  const datos = documento.data();
+
+  if (typeof datos.price !== "number" || typeof datos.name !== "string") {
+    throw new Error(`El producto ${documento.id} no tiene un precio o un nombre utilizables.`);
+  }
+
+  return { id: documento.id, name: datos.name, price: datos.price };
+}
+
+/** Crea una orden VÁLIDA para el usuario en sesión y devuelve su id. */
+async function crearOrdenDePrueba(userId: string, producto: ProductoDeCatalogo): Promise<string> {
   const referencia = doc(collection(db, ORDERS));
 
   await setDoc(referencia, {
     userId,
-    items: [{ productId: "prueba", name: "Producto de prueba", priceAtPurchase: 100, quantity: 1 }],
-    total: 100,
+    items: [
+      {
+        productId: producto.id,
+        name: producto.name,
+        // El precio real del catálogo: cualquier otro valor sería rechazado.
+        priceAtPurchase: producto.price,
+        quantity: 1,
+      },
+    ],
+    total: producto.price,
     status: "pending",
     createdAt: serverTimestamp(),
   });
@@ -217,7 +263,14 @@ async function main(): Promise<void> {
     env.TEST_CUSTOMER_EMAIL,
     env.TEST_CUSTOMER_PASSWORD,
   );
-  const ordenDelCustomer = await crearOrdenDePrueba(customer.user.uid);
+
+  // Las órdenes de prueba tienen que usar un producto REAL: las reglas
+  // comparan el precio de cada ítem contra el catálogo, así que un productId
+  // inventado se rechaza.
+  const producto = await obtenerProductoDelCatalogo();
+  console.log(`Producto usado en las pruebas: ${producto.name} ($ ${producto.price})\n`);
+
+  const ordenDelCustomer = await crearOrdenDePrueba(customer.user.uid, producto);
 
   await signOut(auth);
 
@@ -226,7 +279,7 @@ async function main(): Promise<void> {
     env.TEST_ADMIN_EMAIL,
     env.TEST_ADMIN_PASSWORD,
   );
-  const ordenDelAdmin = await crearOrdenDePrueba(admin.user.uid);
+  const ordenDelAdmin = await crearOrdenDePrueba(admin.user.uid, producto);
 
   await signOut(auth);
 
@@ -236,7 +289,13 @@ async function main(): Promise<void> {
   // con problemas dejaría dos órdenes más contaminando la base — y son
   // imposibles de borrar desde el cliente.
   try {
-    await ejecutarPruebas(customer.user.uid, admin.user.uid, ordenDelCustomer, ordenDelAdmin);
+    await ejecutarPruebas(
+      customer.user.uid,
+      admin.user.uid,
+      ordenDelCustomer,
+      ordenDelAdmin,
+      producto,
+    );
   } finally {
     await limpiarOrdenesDePrueba(ordenesACancelar);
   }
@@ -255,13 +314,22 @@ async function main(): Promise<void> {
  * @param uidAdmin         uid del administrador.
  * @param ordenDelCustomer id de la orden de prueba del cliente.
  * @param ordenDelAdmin    id de la orden de prueba del administrador.
+ * @param producto         producto real del catálogo, con su precio verdadero.
  */
 async function ejecutarPruebas(
   uidCustomer: string,
   uidAdmin: string,
   ordenDelCustomer: string,
   ordenDelAdmin: string,
+  producto: ProductoDeCatalogo,
 ): Promise<void> {
+  /** Una línea de orden con el precio correcto del catálogo. */
+  const lineaValida = {
+    productId: producto.id,
+    name: producto.name,
+    priceAtPurchase: producto.price,
+    quantity: 1,
+  };
   // -------------------------------------------------------------------------
   console.log("\n--- COMO CLIENTE ---");
   await signInWithEmailAndPassword(auth, env.TEST_CUSTOMER_EMAIL, env.TEST_CUSTOMER_PASSWORD);
@@ -301,8 +369,8 @@ async function ejecutarPruebas(
   await comprobar("crea una orden a nombre de OTRO usuario", "rechazado", () =>
     setDoc(doc(collection(db, ORDERS)), {
       userId: uidAdmin,
-      items: [{ productId: "x", name: "x", priceAtPurchase: 1, quantity: 1 }],
-      total: 1,
+      items: [lineaValida],
+      total: producto.price,
       status: "pending",
       createdAt: serverTimestamp(),
     }),
@@ -311,8 +379,8 @@ async function ejecutarPruebas(
   await comprobar("crea una orden ya marcada como completada", "rechazado", () =>
     setDoc(doc(collection(db, ORDERS)), {
       userId: uidCustomer,
-      items: [{ productId: "x", name: "x", priceAtPurchase: 1, quantity: 1 }],
-      total: 1,
+      items: [lineaValida],
+      total: producto.price,
       status: "completed",
       createdAt: serverTimestamp(),
     }),
@@ -321,8 +389,8 @@ async function ejecutarPruebas(
   await comprobar("crea una orden con un campo inventado", "rechazado", () =>
     setDoc(doc(collection(db, ORDERS)), {
       userId: uidCustomer,
-      items: [{ productId: "x", name: "x", priceAtPurchase: 1, quantity: 1 }],
-      total: 1,
+      items: [lineaValida],
+      total: producto.price,
       status: "pending",
       createdAt: serverTimestamp(),
       descuentoSecreto: 100,
@@ -332,48 +400,81 @@ async function ejecutarPruebas(
   await comprobar("crea una orden con fecha propia en vez de la del servidor", "rechazado", () =>
     setDoc(doc(collection(db, ORDERS)), {
       userId: uidCustomer,
-      items: [{ productId: "x", name: "x", priceAtPurchase: 1, quantity: 1 }],
-      total: 1,
+      items: [lineaValida],
+      total: producto.price,
       status: "pending",
       createdAt: new Date("2020-01-01"),
     }),
   );
 
-  // ⚠ ESTA PRUEBA ESPERA "PERMITIDO", Y ES UN LÍMITE CONOCIDO, NO UN DESCUIDO.
+  // ---------------------------------------------------------------------
+  // VERIFICACIÓN DEL PRECIO CONTRA EL CATÁLOGO
+  // ---------------------------------------------------------------------
   //
-  // El lenguaje de las reglas no puede recorrer un array, así que no hay forma
-  // de validar la FORMA de cada ítem. Una orden con `items: [1, 2, 3]` cumple
-  // todo lo que las reglas sí pueden comprobar —es una lista, tiene entre 1 y 50
-  // elementos— y por lo tanto se acepta.
+  // Estas cinco pruebas cubren el agujero más grave que tuvo el proyecto: sin
+  // ellas, cualquier cliente podía escribir su propio precio desde la consola
+  // del navegador y comprar a lo que quisiera.
   //
-  // Es la consecuencia directa del modelo que exige el enunciado (ítems
-  // embebidos). El proyecto anterior guardaba cada ítem como documento propio
-  // justamente para poder validarlo con una regla por ítem.
-  //
-  // La app se defiende del lado del cliente: los listados convierten documento
-  // por documento con parseOrderSnapshot(), que omite los inválidos en lugar de
-  // romperse. Sin esa defensa, este único documento dejaría inutilizables el
-  // historial del cliente y el panel de administración DE FORMA PERMANENTE,
-  // porque las reglas tampoco permiten borrar órdenes.
-  //
-  // Si algún día esta prueba pasa a dar "rechazado", quiere decir que las reglas
-  // ganaron capacidad de validar arrays: hay que celebrarlo y actualizarla.
-  const ordenConItemsInvalidos = doc(collection(db, ORDERS));
+  // Las reglas lo cierran validando cada posición del array por índice, que es
+  // lo que la documentación oficial recomienda cuando no se puede iterar.
 
-  await comprobar(
-    "crea una orden con items que no son objetos (límite conocido de las reglas)",
-    "permitido",
-    () =>
-      setDoc(ordenConItemsInvalidos, {
-        userId: uidCustomer,
-        items: [1, 2, 3],
-        total: 1,
-        status: "pending",
-        createdAt: serverTimestamp(),
-      }),
+  await comprobar("compra a un precio inventado, más barato que el del catálogo", "rechazado", () =>
+    setDoc(doc(collection(db, ORDERS)), {
+      userId: uidCustomer,
+      items: [{ ...lineaValida, priceAtPurchase: 0.01 }],
+      total: 0.01,
+      status: "pending",
+      createdAt: serverTimestamp(),
+    }),
   );
 
-  ordenesACancelar.push(ordenConItemsInvalidos.id);
+  await comprobar("declara un total que no coincide con sus líneas", "rechazado", () =>
+    setDoc(doc(collection(db, ORDERS)), {
+      userId: uidCustomer,
+      items: [{ ...lineaValida, quantity: 5 }],
+      // Debería ser precio × 5.
+      total: producto.price,
+      status: "pending",
+      createdAt: serverTimestamp(),
+    }),
+  );
+
+  await comprobar("compra un producto que no existe en el catálogo", "rechazado", () =>
+    setDoc(doc(collection(db, ORDERS)), {
+      userId: uidCustomer,
+      items: [{ ...lineaValida, productId: "producto-inexistente-123" }],
+      total: producto.price,
+      status: "pending",
+      createdAt: serverTimestamp(),
+    }),
+  );
+
+  // Antes de la corrección, esta escritura era ACEPTADA: las reglas solo
+  // comprobaban que "items" fuera una lista de tamaño razonable. El documento
+  // resultante rompía la validación al leerlo, y como las órdenes no se pueden
+  // borrar, dejaba el historial y el panel inutilizables de forma permanente.
+  await comprobar("crea una orden con items que no son objetos", "rechazado", () =>
+    setDoc(doc(collection(db, ORDERS)), {
+      userId: uidCustomer,
+      items: [1, 2, 3],
+      total: 1,
+      status: "pending",
+      createdAt: serverTimestamp(),
+    }),
+  );
+
+  // El tope de 10 no es una preferencia: es el máximo de llamadas a get() que
+  // Firestore permite por request de un solo documento, y las reglas gastan una
+  // por ítem para verificar su precio.
+  await comprobar("crea una orden con más ítems de los que las reglas pueden verificar", "rechazado", () =>
+    setDoc(doc(collection(db, ORDERS)), {
+      userId: uidCustomer,
+      items: Array.from({ length: 11 }, () => lineaValida),
+      total: producto.price * 11,
+      status: "pending",
+      createdAt: serverTimestamp(),
+    }),
+  );
 
   await comprobar("borra su propia orden", "rechazado", () =>
     // deleteDoc se importa dinámicamente para no sumarlo arriba solo por esta

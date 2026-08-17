@@ -40,11 +40,15 @@ request.resource.data.unitPrice == get(/products/$(productId)).data.price
 
 Eso cerraba un agujero concreto: alguien que editara su `localStorage` no podía comprar más barato.
 
-**El contrato de esta homework exige el modelo opuesto**, y es explícito en que no se negocia. Al volver a `items[]` embebidos, esa verificación **deja de ser posible**.
+**El contrato de esta homework exige el modelo opuesto**, y es explícito en que no se negocia.
 
-**Decisión: se adopta el modelo del enunciado, y se documenta el costo.** Las reglas siguen validando forma, tipos, cantidad de ítems y rangos, pero ya no pueden contrastar precios ni comprobar que `total` sea la suma de las líneas. Está escrito en tres lugares donde alguien lo va a leer: `src/types/order.ts`, `firestore.rules` y acá.
+**Primera decisión (equivocada): adoptar el modelo y dar la verificación por perdida.** Se documentó como trade-off consciente en tres lugares. La revisión de seguridad posterior demostró que **no era un trade-off aceptable sino un agujero explotable**, y que documentar un hueco no lo cierra. Ver la sección del `/security-review` más abajo.
 
-**Mitigación parcial aplicada:** el service **recalcula** el total a partir de los ítems en vez de copiar `cart.totalPrice`. No cierra el agujero —los precios de los ítems vienen del mismo lugar— pero elimina la incoherencia de guardar un total que no se corresponde con las líneas de la propia orden. Hay un test que lo fuerza: se le pasa un carrito cuyo `totalPrice` dice `999999` y se verifica que se guarde `250`.
+**Decisión final: se recuperó la verificación sin abandonar el modelo del contrato.** Las reglas no pueden *recorrer* un array, pero sí *acceder a una posición* con notación de corchetes — que es justamente lo que la documentación oficial recomienda para validar listas. `firestore.rules` desenrolla la comprobación de la posición 0 a la 9 y contrasta cada precio contra `products`.
+
+De ahí sale el tope de **10 ítems por orden**: Firestore permite un máximo de 10 llamadas a `get()` por request de un solo documento, y cada ítem consume una.
+
+**Mitigación adicional:** el service **recalcula** el total en vez de copiar `cart.totalPrice`, y las reglas lo verifican contra la suma de las líneas. Hay un test que fuerza lo primero: se le pasa un carrito cuyo `totalPrice` dice `999999` y se verifica que se guarde `250`.
 
 ---
 
@@ -247,6 +251,76 @@ Es exactamente el error que este documento critica más arriba al hablar de la c
 Creaba órdenes de prueba que **las reglas vuelven imposibles de borrar desde el cliente**, así que quedaban para siempre en el historial real y en el panel. Se había mencionado el problema ("borralas desde la consola") sin notar que desde el cliente no se podían borrar.
 
 **Corrección:** limpieza con el SDK de Admin dentro de un `finally`, para que ocurra aunque una prueba falle. Es la única parte del script que se saltea las reglas, y es deliberado: ahí no se verifica nada, se limpia.
+
+---
+
+## Auditoría de seguridad: `/security-review`
+
+Después del code review se pasó una revisión enfocada solo en seguridad. Encontró **un hallazgo, de severidad alta**, y era el más importante de todo el proyecto.
+
+### El agujero: el precio dejó de verificarse en ningún lado
+
+El diagnóstico fue exacto y demoledor:
+
+> *"Esta rama eliminó la única verificación de precio del lado del servidor que el proyecto tenía. […] `createOrderFromCart` recalcula el total en el cliente, pero tanto el carrito como sus precios salen de `localStorage`, y de todas formas el SDK se puede invocar desde la consola. El recálculo en el cliente no es un control. La rama documenta el trade-off, pero **documentar un agujero no lo cierra**."*
+
+El exploit, ejecutable por cualquier cliente autenticado desde la consola del navegador:
+
+```js
+setDoc(doc(collection(db, 'orders')), {
+  userId: <su propio uid>,
+  items: [{ productId: 'nike-air-max', name: 'Nike Air Max 90', priceAtPurchase: 0.01, quantity: 10 }],
+  total: 0.1, status: 'pending', createdAt: serverTimestamp(),
+})
+```
+
+Pasaba **todas** las condiciones de la regla, superaba la validación al leerse, y se mostraba como una orden legítima de \$0,10 que un administrador procesaría sin notar nada.
+
+**Es exactamente el ataque que la regla eliminada existía para bloquear**, como decía su propio comentario en el L7: *"era exactamente lo que permitía comprar a cualquier precio editando el localStorage"*.
+
+### Por qué las dos soluciones propuestas no servían
+
+El revisor propuso mover la escritura a un camino de servidor (Cloud Function) o mantener una subcolección espejo. **El enunciado excluye explícitamente ambas**: *"No Cloud Functions"* y *"No recalcular totales server-side"*. La subcolección espejo además no funcionaba: las reglas no pueden verificar que el `items[]` embebido coincida con ella, y el array embebido es el que se muestra.
+
+### La solución: verificación desenrollada por índice
+
+Consultando la documentación oficial apareció la pieza que faltaba:
+
+> *"Security rules do not support generics for list types. You can verify that a field is a list, but you cannot enforce that all members share the same data type. **You must validate specific entries individually using bracket notation.**"*
+
+Las reglas no pueden **recorrer** un array, pero sí **acceder a una posición**. De ahí el desenrollado de `itemValido(items, 0)` a `itemValido(items, 9)`, cada uno comparando `items[i].priceAtPurchase` contra `precioDeCatalogo(items[i].productId)`. El `total` se verifica contra la suma de las líneas.
+
+**Cierra el exploit sin violar ninguna exclusión del enunciado**: no es una Cloud Function, no recalcula totales en el servidor (los *verifica*), y el modelo `items[]` embebido queda intacto.
+
+### El límite duro que apareció al investigar
+
+Antes de escribir la regla se verificó en la documentación un dato que resultó decisivo: **Firestore permite un máximo de 10 llamadas a `get()` por request de un solo documento**, y excederlo devuelve `permission-denied`.
+
+Como cada ítem consume una, el tope de productos por orden **no es una decisión de diseño: es el techo de la plataforma**. `MAX_ITEMS_PER_ORDER` bajó de 50 a 10, y queda señalado en mayúsculas en las reglas que agregar cualquier `get()` a esa regla —incluido un `isAdmin()`— la rompería.
+
+Haberlo consultado *antes* de escribir evitó desplegar una regla que habría rechazado órdenes legítimas de forma intermitente, según cuántos productos distintos tuviera el carrito.
+
+### Verificación
+
+| Caso nuevo | Resultado |
+|---|---|
+| Precio inventado más barato | rechazado ✅ |
+| Total que no coincide con las líneas | rechazado ✅ |
+| Producto inexistente | rechazado ✅ |
+| Más de 10 ítems | rechazado ✅ |
+| `items: [1,2,3]` *(antes permitido)* | rechazado ✅ |
+
+Y —lo más importante— se comprobó en el navegador que **una compra legítima sigue funcionando**: tres productos distintos con cantidades 3, 2 y 1, total \$387.680, confirmada y persistida correctamente. Endurecer las reglas sin verificar el camino feliz habría cambiado un agujero de seguridad por un producto roto.
+
+### Lo que el revisor examinó y encontró correcto
+
+Las reglas de lectura y actualización, la paridad de la máquina de estados entre código y reglas, el `console.error` de `parseOrderSnapshot` (registra solo ids y rutas de Zod, sobre documentos que la sesión ya podía leer), la ausencia de XSS e inyección, el uso del SDK de Admin acotado a la limpieza del script, y el manejo de secretos.
+
+### Una predicción propia que falló, otra vez
+
+Antes de correr la revisión se anticipó que marcaría el `.env` con contraseñas de prueba, el `console.error`, y algo del flujo heredado de S3. **No marcó nada de eso.** Encontró un solo problema, más grave que todos los que se habían previsto, y en el único lugar donde se creía haber tomado una decisión informada.
+
+Es la segunda vez en este proyecto que la predicción sobre qué encontraría una revisión resulta equivocada. La conclusión práctica: anticipar los hallazgos sirve para prepararse, nunca para filtrarlos.
 
 ---
 

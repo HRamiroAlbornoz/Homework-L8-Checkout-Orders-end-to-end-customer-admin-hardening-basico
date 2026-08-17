@@ -85,15 +85,24 @@ orders/{orderId} → { userId, items[], total, status, createdAt, updatedAt? }
 
 Cada ítem es una **foto** del producto (`productId`, `name`, `priceAtPurchase`, `quantity`). El historial **no** se rehidrata leyendo `products`: si el precio cambia o el producto se elimina, la orden tiene que seguir mostrando qué se compró y a cuánto.
 
-**⚠ Este modelo reemplazó a uno más seguro, y hay que saberlo antes de tocarlo.**
+**El precio de cada ítem se verifica contra el catálogo, dentro de las reglas.**
 
-Hasta el L7, cada ítem era un documento propio en `orders/{id}/items/{itemId}`, y no era una decisión organizativa sino de seguridad: las reglas **no pueden recorrer un array**, pero **sí pueden leer otros documentos con `get()`**. Con un documento por ítem, cada uno tenía su propia evaluación de regla y se podía comparar su precio contra el catálogo, lo que impedía comprar más barato editando `localStorage`.
+Hasta el L7 eso se lograba con una subcolección: un documento por ítem, cada uno con su propia evaluación de regla, y un `get()` contra `products` para comparar el precio. Impedía comprar más barato editando `localStorage`.
 
-El contrato del enunciado del L8 exige el modelo embebido, así que **esa verificación ya no es posible**. Las reglas validan forma, tipos, cantidad de ítems y rangos, pero no precios ni la suma del total.
+El contrato del L8 exige ítems embebidos, y la primera versión de esta rama dio esa verificación por perdida — un agujero real que una revisión de seguridad encontró y que se comprobó explotable contra Firestore.
 
-Consecuencias que hay que conocer:
+Se recuperó sin abandonar el modelo del contrato: las reglas no pueden **recorrer** un array, pero sí **acceder a una posición** (`items[0]`, `items[1]`, …). `firestore.rules` desenrolla la comprobación de 0 a 9.
 
-- **El total se recalcula en el service**, nunca se copia de `cart.totalPrice`. No cierra el agujero —los precios vienen del mismo lugar— pero evita guardar un total incoherente con las líneas de la propia orden. Hay un test que lo fuerza.
+**⚠ LO QUE HAY QUE SABER ANTES DE TOCAR ESA REGLA:**
+
+- **El tope de 10 ítems es el techo de la plataforma**, no una preferencia. Firestore permite **10 llamadas a `get()` por request de un solo documento**, y cada ítem consume una. Estamos exactamente en el límite.
+- **No se puede agregar NINGÚN `get()` más a `allow create`** —ni siquiera un `isAdmin()`— sin bajar antes el tope.
+- Dos ítems del mismo producto consumen **una sola** llamada: los `get()` repetidos se cachean.
+
+Otras consecuencias del modelo:
+
+- **El total se verifica en las reglas** contra la suma de las líneas, con una tolerancia de un centavo (el cliente redondea cada línea y las reglas no tienen función de redondeo). El service además lo recalcula en vez de copiar `cart.totalPrice`.
+- **Si un admin cambia el precio de un producto, los carritos que ya lo tenían dejan de poder confirmarse.** Es el costo de verificar; el checkout lo maneja con un mensaje de error.
 - **`priceAtPurchase`, no `unitPrice`.** El carrito conserva `unitPrice`; el mapeo ocurre en el service, porque el significado cambia: en el carrito es el precio de hoy, en la orden es el de esa compra.
 - **Ya no se usa `writeBatch`.** Con un único documento, la escritura es atómica por definición.
 

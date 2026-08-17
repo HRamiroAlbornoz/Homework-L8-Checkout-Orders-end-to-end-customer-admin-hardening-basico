@@ -176,33 +176,121 @@ service cloud.firestore {
       allow delete: if false;
     }
 
-    // Forma mínima válida de una orden.
+    // =======================================================================
+    // VERIFICACIÓN DE LOS ÍTEMS CONTRA EL CATÁLOGO
+    // =======================================================================
     //
-    // ⚠ LO QUE ESTAS REGLAS **NO** PUEDEN VERIFICAR
+    // El lenguaje de las reglas NO puede recorrer un array: no hay bucles ni
+    // map/reduce. Pero SÍ puede acceder a una posición concreta con notación de
+    // corchetes (`items[0]`), que es lo que la documentación oficial recomienda
+    // para validar listas: "You must validate specific entries or keys
+    // individually using bracket notation".
     //
-    // El lenguaje de las reglas no permite RECORRER un array: no hay bucles ni
-    // funciones tipo map/reduce. Por eso acá se valida que "items" sea una lista
-    // con una cantidad razonable de elementos, pero NO se puede comprobar la
-    // forma de cada ítem, ni contrastar su precio contra products, ni verificar
-    // que "total" sea la suma de las líneas.
+    // De ahí este desenrollado: una llamada por posición, de 0 a 9. Feo, pero es
+    // lo que permite verificar el precio de CADA ítem contra el catálogo — la
+    // misma protección que el proyecto anterior lograba con una subcolección, y
+    // que se había perdido al pasar a ítems embebidos.
     //
-    // Es una consecuencia directa del modelo que pide el enunciado (ítems
-    // embebidos en la orden). El proyecto anterior guardaba cada ítem como un
-    // documento propio en una subcolección justamente para poder verificar su
-    // precio con un get() — cosa que acá deja de ser posible.
+    // ⚠⚠ EL TOPE DE 10 ÍTEMS NO ES ARBITRARIO: ES EL TECHO DE LA PLATAFORMA ⚠⚠
     //
-    // El trade-off está documentado en docs/ai-notes.md y en src/types/order.ts.
+    // Firestore permite un MÁXIMO DE 10 llamadas a get()/exists() por request de
+    // un solo documento. Pasarse devuelve permission-denied. Cada ítem consume
+    // una (el get() del producto), así que con 10 ítems distintos estamos
+    // EXACTAMENTE EN EL LÍMITE, sin margen.
+    //
+    // Consecuencias que hay que tener presentes antes de tocar esta regla:
+    //
+    //   · NO se puede subir el tope de ítems sin romper las creaciones.
+    //   · NO se puede agregar NINGÚN get() más a `allow create` — ni siquiera
+    //     un isAdmin() — sin bajar antes el tope.
+    //   · Dos ítems del mismo producto consumen UNA sola llamada: los get()
+    //     repetidos al mismo documento se cachean y no cuentan de nuevo.
+    //
+    // El tope está duplicado en MAX_ITEMS_PER_ORDER (src/types/order.ts) para
+    // que el cliente falle antes con un mensaje claro. Acá es donde se aplica
+    // de verdad.
+    // =======================================================================
+
+    // Precio actual de un producto del catálogo. Si el documento no existe,
+    // get() falla y la regla que la invoca deniega la operación — que es lo
+    // correcto: no se puede comprar algo que no está en el catálogo.
+    function precioDeCatalogo(productId) {
+      return get(/databases/$(database)/documents/products/$(productId)).data.price;
+    }
+
+    // Valida el ítem en la posición i, si existe.
+    //
+    // El primer término cortocircuita: cuando la lista es más corta que i, la
+    // condición se cumple sin evaluar nada más y sin gastar ninguna llamada.
+    // Por eso una orden de 2 ítems cuesta 2 get(), no 10.
+    function itemValido(items, i) {
+      return items.size() <= i
+             || (items[i].keys().hasOnly(['productId', 'name', 'priceAtPurchase', 'quantity'])
+                 && items[i].productId is string
+                 && items[i].name is string
+                 && items[i].name.size() > 0
+                 && items[i].name.size() <= 120
+                 && items[i].quantity is int
+                 && items[i].quantity > 0
+                 // Mismo tope que MAX_QUANTITY_PER_ITEM en cartConstants.ts.
+                 && items[i].quantity <= 99
+                 // LA LÍNEA QUE CIERRA EL AGUJERO: el precio guardado tiene que
+                 // ser EXACTAMENTE el que figura hoy en el catálogo. Sin esto,
+                 // cualquier usuario podía comprar a su propio precio llamando
+                 // al SDK desde la consola del navegador.
+                 //
+                 // Efecto secundario aceptado: si un administrador cambia el
+                 // precio de un producto, los carritos que ya lo tenían dejan de
+                 // poder confirmarse.
+                 && items[i].priceAtPurchase == precioDeCatalogo(items[i].productId));
+    }
+
+    // Importe de la línea i, o 0 si esa posición no existe.
+    function subtotal(items, i) {
+      return items.size() <= i ? 0 : items[i].priceAtPurchase * items[i].quantity;
+    }
+
+    // Suma de todas las líneas. No gasta ninguna llamada a get(): solo lee
+    // valores que ya están en el documento que se intenta escribir.
+    function sumaDeLineas(items) {
+      return subtotal(items, 0) + subtotal(items, 1) + subtotal(items, 2)
+             + subtotal(items, 3) + subtotal(items, 4) + subtotal(items, 5)
+             + subtotal(items, 6) + subtotal(items, 7) + subtotal(items, 8)
+             + subtotal(items, 9);
+    }
+
     function isValidOrderShape(data) {
       return data.userId is string
              && data.userId.size() > 0
              && data.total is number
-             && data.total >= 0
+             && data.total > 0
              && data.items is list
              && data.items.size() > 0
-             // Mismo tope que MAX_ITEMS_PER_ORDER en src/types/order.ts. Está
-             // duplicado a propósito: las reglas no pueden importar código de la
-             // app, y este es el único lugar donde el límite se aplica de verdad.
-             && data.items.size() <= 50;
+             && data.items.size() <= 10
+             && itemValido(data.items, 0)
+             && itemValido(data.items, 1)
+             && itemValido(data.items, 2)
+             && itemValido(data.items, 3)
+             && itemValido(data.items, 4)
+             && itemValido(data.items, 5)
+             && itemValido(data.items, 6)
+             && itemValido(data.items, 7)
+             && itemValido(data.items, 8)
+             && itemValido(data.items, 9)
+             // El total tiene que coincidir con la suma de las líneas, con una
+             // tolerancia de UN CENTAVO.
+             //
+             // La tolerancia no es pereza: el cliente redondea cada línea a dos
+             // decimales antes de sumar (para que el total coincida con lo que
+             // muestra en pantalla) y las reglas no tienen función de redondeo.
+             // Con precios decimales, una comparación exacta rechazaría órdenes
+             // legítimas por el error de punto flotante — 10.55 × 3 da
+             // 31.650000000000002 en aritmética de coma flotante.
+             //
+             // Un centavo de margen no habilita ningún abuso: los precios de
+             // cada ítem ya están verificados uno por uno contra el catálogo.
+             && data.total >= sumaDeLineas(data.items) - 0.01
+             && data.total <= sumaDeLineas(data.items) + 0.01;
     }
 
     // Transiciones permitidas entre estados.
