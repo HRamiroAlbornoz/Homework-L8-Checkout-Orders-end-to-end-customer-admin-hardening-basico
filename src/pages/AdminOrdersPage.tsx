@@ -36,6 +36,11 @@ export function AdminOrdersPage() {
 
   const [actionError, setActionError] = useState<string | null>(null);
 
+  // Confirmación del cambio aplicado. Se anuncia en una región live: sin ella,
+  // quien usa un lector de pantalla solo percibe que la confirmación desapareció,
+  // sin saber si el cambio se guardó o si se canceló.
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+
   // ---------------------------------------------------------------------------
   // MANEJO DEL FOCO DE LA CONFIRMACIÓN
   // ---------------------------------------------------------------------------
@@ -51,6 +56,17 @@ export function AdminOrdersPage() {
   // esto, cancelar deja el foco en la nada y hay que volver a recorrer la página
   // entera para retomar donde se estaba.
   const triggerRef = useRef<HTMLSelectElement | null>(null);
+
+  // Al confirmar con éxito, la lista se recarga y el <select> que abrió la
+  // confirmación deja de existir en el DOM. Devolverle el foco no sirve: es un
+  // nodo desprendido, y el foco termina cayendo en el <body> — quien navega con
+  // teclado queda en la nada y tiene que tabular desde el principio de la página.
+  //
+  // Por eso el foco va al encabezado de la sección, que sí sobrevive a la
+  // recarga. Necesita tabIndex={-1} para poder recibirlo: los encabezados no son
+  // enfocables por defecto, y ese valor lo hace enfocable por código SIN
+  // agregarlo al recorrido del tabulador.
+  const headingRef = useRef<HTMLHeadingElement>(null);
 
   useEffect(() => {
     if (pendingChange) {
@@ -84,6 +100,7 @@ export function AdminOrdersPage() {
 
     if (parsed.success) {
       setActionError(null);
+      setSuccessMessage(null);
       triggerRef.current = select;
       setPendingChange({ order, nextStatus: parsed.data });
     }
@@ -106,6 +123,13 @@ export function AdminOrdersPage() {
       // estuvieran en el finally, se cerraría la confirmación y se recargaría la
       // lista incluso cuando la escritura falló.
       setPendingChange(null);
+      setSuccessMessage(
+        `La orden ${order.id} pasó a ${ORDER_STATUS_LABELS[nextStatus]}.`,
+      );
+
+      // El foco se mueve al encabezado de la sección, no al selector que abrió
+      // la confirmación: ese selector está por desaparecer con la recarga.
+      headingRef.current?.focus();
 
       // Se recarga desde Firestore en vez de actualizar la fila en memoria. Es
       // una lectura más, pero garantiza que lo que se ve sea lo que quedó
@@ -249,7 +273,17 @@ export function AdminOrdersPage() {
 
   return (
     <section className="admin-orders">
-      <h2>Órdenes</h2>
+      {/* tabIndex={-1}: enfocable por código, pero fuera del recorrido del
+          tabulador. Es a donde se manda el foco después de un cambio exitoso. */}
+      <h2 ref={headingRef} tabIndex={-1}>
+        Órdenes
+      </h2>
+
+      {successMessage && (
+        <p className="admin-orders__success" role="status">
+          {successMessage}
+        </p>
+      )}
 
       <div className="admin-orders__filter">
         <label htmlFor="filtro-estado">Filtrar por estado</label>

@@ -286,6 +286,42 @@ describe("AdminOrdersPage — accesibilidad de la confirmación", () => {
     expect(updateOrderStatus).not.toHaveBeenCalled();
   });
 
+  it("al confirmar con éxito, el foco no se pierde en el body", async () => {
+    const user = userEvent.setup();
+    vi.mocked(listOrders).mockResolvedValue([makeOrder({ id: "o-1", status: "pending" })]);
+
+    renderWithProviders(<AdminOrdersPage />);
+    await screen.findByLabelText(/cambiar el estado de la orden o-1/i);
+
+    await user.selectOptions(selectorDeEstado("o-1"), "processing");
+    await user.click(await screen.findByRole("button", { name: /sí, cambiar el estado/i }));
+
+    // No se puede devolver el foco al <select> que abrió la confirmación: la
+    // lista se recarga y ese nodo deja de existir, así que el foco terminaría en
+    // el <body> y quien navega con teclado tendría que empezar de nuevo desde
+    // arriba de la página. Va al encabezado de la sección, que sobrevive.
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Órdenes" })).toHaveFocus();
+    });
+  });
+
+  it("anuncia el cambio aplicado en una región live", async () => {
+    const user = userEvent.setup();
+    vi.mocked(listOrders).mockResolvedValue([makeOrder({ id: "o-1", status: "pending" })]);
+
+    renderWithProviders(<AdminOrdersPage />);
+    await screen.findByLabelText(/cambiar el estado de la orden o-1/i);
+
+    await user.selectOptions(selectorDeEstado("o-1"), "processing");
+    await user.click(await screen.findByRole("button", { name: /sí, cambiar el estado/i }));
+
+    // Sin este mensaje, quien usa un lector de pantalla solo percibe que la
+    // confirmación desapareció, sin saber si el cambio se guardó o se canceló.
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      /la orden o-1 pasó a En preparación/i,
+    );
+  });
+
   it("al cancelar devuelve el foco al selector que lo abrió", async () => {
     const user = userEvent.setup();
     vi.mocked(listOrders).mockResolvedValue([makeOrder({ id: "o-1", status: "pending" })]);

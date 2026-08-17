@@ -1592,3 +1592,20 @@ h1 {
     transition: none;
   }
 }
+
+/* Confirmación de que el cambio de estado se aplicó. Es una región live: se
+   anuncia sola al aparecer, sin que el usuario tenga que ir a buscarla. */
+.admin-orders__success {
+  margin-bottom: 20px;
+  padding: 12px 16px;
+  border: 1px solid var(--status-completed-text);
+  border-radius: 8px;
+  background: var(--status-completed-bg);
+  color: var(--status-completed-text);
+}
+
+/* El encabezado recibe el foco tras un cambio exitoso. Sin outline-offset, el
+   anillo queda pegado a las letras y se lee como un error de maquetado. */
+.admin-orders h2:focus-visible {
+  outline-offset: 4px;
+}
