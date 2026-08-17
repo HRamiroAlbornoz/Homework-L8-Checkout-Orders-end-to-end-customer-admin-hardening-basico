@@ -1,6 +1,6 @@
 {
   "projects": {
-    "default": "catalogo-escalable-henry"
+    "default": "checkout-orders-henry"
   },
   "targets": {},
   "etags": {}
