@@ -360,7 +360,7 @@ La corrección no cancela la escritura, porque va a completarse sola: a los 8 se
 
 Es la misma lección que la contraprueba de los secretos, en otro disfraz: **medir algo cercano al problema no es medir el problema**.
 
-### Por qué esta ronda encontró lo que 531 tests no
+### Por qué esta ronda encontró lo que los 531 tests de entonces no
 
 Los cuatro hallazgos comparten una característica: **ninguno era observable desde un test**.
 

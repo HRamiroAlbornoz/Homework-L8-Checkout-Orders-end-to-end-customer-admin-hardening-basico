@@ -6,7 +6,7 @@ Construido sobre la base del proyecto anterior ([L7 — Release Candidate del E-
 
 | | |
 |---|---|
-| Tests | 531 en 28 archivos |
+| Tests | 533 en 28 archivos |
 | Pruebas de reglas | 28 contra Firestore real ([resultado](docs/verificacion-reglas.txt)) |
 | CI | Lint, type-check, tests y build en cada push y PR |
 | Decisiones y uso de IA | [`docs/ai-notes.md`](docs/ai-notes.md) |
