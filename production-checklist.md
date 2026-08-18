@@ -1,5 +1,33 @@
 # Production Checklist — E-commerce Release Candidate
 
+> ## ⚠ Este documento es del proyecto ANTERIOR (Homework L7)
+>
+> Llegó a este repositorio con el commit que importó el código del L7 como base,
+> y se conserva porque su contenido —las diez notas de debugging sobre el deploy,
+> el plan de rollback, la verificación de secretos en el bundle— sigue siendo
+> válido y útil.
+>
+> **Pero describe otro proyecto.** La URL de producción, los 390 tests y varias
+> decisiones que menciona ya no corresponden a esta homework. En particular:
+>
+> | Este documento dice | En el L8 |
+> |---|---|
+> | Los ítems viven en una subcolección `orders/{id}/items/{itemId}` | Van embebidos en `items[]`, como exige el contrato del enunciado |
+> | Los totales no se guardan, se calculan al leer | `total` se guarda y las reglas lo verifican contra la suma de las líneas |
+> | Estados `created` / `paid` / `cancelled` | `pending` / `processing` / `completed` / `cancelled` |
+> | Las órdenes no se editan (`allow update: if false`) | Un administrador puede cambiar `status` y `updatedAt` |
+>
+> Lo que **sí** se conservó es la idea de fondo: el precio de cada ítem se
+> verifica contra el catálogo dentro de las reglas. El L7 lo lograba con una
+> subcolección; el L8 lo consigue accediendo a cada posición del array por
+> índice. La historia completa está en [`docs/ai-notes.md`](docs/ai-notes.md).
+>
+> **La verificación de ESTA homework** está en
+> [`docs/verificacion-reglas.txt`](docs/verificacion-reglas.txt) (28 pruebas
+> contra Firestore real), en [`docs/test-output.txt`](docs/test-output.txt)
+> (533 tests) y en la sección *Verificación manual de los flujos* del
+> [README](README.md).
+
 **URL de producción:** https://homework-l7-release-candidate-del-e.vercel.app/
 **Repositorio:** https://github.com/HRamiroAlbornoz/Homework-L7-Release-Candidate-del-E-commerce
 **Fecha de verificación:** 13 de agosto de 2026
