@@ -384,3 +384,43 @@ describe("CheckoutPage — la compra tarda demasiado", () => {
     expect(screen.getByText(/gracias por tu compra/i)).toBeInTheDocument();
   });
 });
+
+describe("CheckoutPage — el mensaje de permisos apunta al carrito", () => {
+  it("ante un rechazo de permisos, manda a revisar el carrito y no la sesión", async () => {
+    const user = userEvent.setup();
+    vi.mocked(createOrderFromCart).mockRejectedValue(
+      new OrderError(
+        ORDER_ERROR_CODES.PERMISSION_DENIED,
+        // El mensaje genérico del service, el mismo que ve el resto de la app.
+        "No pudimos completar la operación. Revisá que tu sesión siga activa y volvé a intentarlo.",
+      ),
+    );
+    renderCheckout();
+
+    await user.click(getConfirmButton());
+    const alerta = await screen.findByRole("alert");
+
+    // Las reglas comparan el precio de cada ítem contra el catálogo, así que la
+    // causa más probable de un rechazo AL COMPRAR es que un administrador cambió
+    // un precio que ya estaba en el carrito. Mandar a iniciar sesión de nuevo
+    // sería un callejón sin salida: la persona saldría, volvería a entrar,
+    // reintentaría y fallaría igual.
+    expect(alerta).toHaveTextContent(/volvé al carrito/i);
+    expect(alerta).not.toHaveTextContent(/sesión siga activa/i);
+  });
+
+  it("no toca los mensajes de los demás errores", async () => {
+    const user = userEvent.setup();
+    vi.mocked(createOrderFromCart).mockRejectedValue(
+      new OrderError(ORDER_ERROR_CODES.NETWORK_ERROR, "No pudimos conectarnos con el servidor.", {
+        retryable: true,
+      }),
+    );
+    renderCheckout();
+
+    await user.click(getConfirmButton());
+
+    // Solo PERMISSION_DENIED se traduce: el resto conserva el texto del service.
+    expect(await screen.findByRole("alert")).toHaveTextContent(/no pudimos conectarnos/i);
+  });
+});

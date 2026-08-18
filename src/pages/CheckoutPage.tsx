@@ -5,7 +5,8 @@ import { useAuth } from "../contexts/AuthContext";
 import { useCart } from "../features/cart/useCart";
 import { useDocumentTitle } from "../hooks/useDocumentTitle";
 import { formatPrice } from "../lib/formatPrice";
-import { mapOrderError, type OrderError } from "../lib/orderErrors";
+import { ORDER_ERROR_CODES } from "../lib/orderErrorCodes";
+import { mapOrderError, OrderError } from "../lib/orderErrors";
 import { createOrderFromCart, createOrderId } from "../services/ordersService";
 
 
@@ -18,6 +19,38 @@ import { createOrderFromCart, createOrderId } from "../services/ordersService";
 // 8 segundos es suficiente para no dispararse con una red lenta normal, y poco
 // como para que nadie sienta que la app se colgó sin avisar.
 const AVISO_DE_DEMORA_MS = 8000;
+
+/**
+ * Mensaje de error adaptado al checkout.
+ *
+ * @param error  el error que devolvió la creación de la orden.
+ * @returns      el texto a mostrar.
+ *
+ * Un rechazo de permisos ACÁ significa algo distinto que en el resto de la app.
+ *
+ * Las reglas de Firestore comparan el precio de cada ítem contra el catálogo
+ * antes de aceptar la orden. La causa más probable de un rechazo al comprar no
+ * es la sesión: es que un administrador cambió el precio de un producto que ya
+ * estaba en el carrito, y el precio guardado dejó de coincidir. Es el efecto
+ * secundario aceptado de verificar.
+ *
+ * El mensaje genérico del service manda a revisar la sesión, que en ese caso no
+ * resuelve nada: la persona cerraría sesión, volvería a entrar, reintentaría y
+ * fallaría igual. Un callejón sin salida.
+ *
+ * Este apunta al carrito, que es donde la acción sí destraba el problema — y
+ * esta pantalla ya tiene el enlace "Volver al carrito" para hacerlo.
+ *
+ * Deliberadamente NO se menciona la verificación de precios: quien haya
+ * manipulado su carrito no debe enterarse de qué fue lo que se detectó.
+ */
+function describirError(error: OrderError): string {
+  if (error.code === ORDER_ERROR_CODES.PERMISSION_DENIED) {
+    return "No pudimos confirmar la compra. Es posible que algún precio haya cambiado: volvé al carrito, revisalo y probá de nuevo.";
+  }
+
+  return error.message;
+}
 
 export function CheckoutPage() {
   // Un solo título para las tres pantallas de esta página (compra pendiente,
@@ -221,7 +254,7 @@ export function CheckoutPage() {
         // para un error: es información urgente que responde a una acción que la
         // persona acaba de hacer.
         <p className="checkout__error" role="alert">
-          {error.message}
+          {describirError(error)}
         </p>
       )}
 

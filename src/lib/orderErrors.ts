@@ -72,26 +72,26 @@ export function mapOrderError(error: unknown): OrderError {
     // Permisos
     // ------------------------------------------------------------------
     //
-    // El mensaje cambió respecto del proyecto anterior, y el motivo importa.
+    // Este mensaje es DELIBERADAMENTE GENÉRICO, y no es pereza: la misma causa
+    // de Firestore (permission-denied) significa cosas distintas según desde
+    // dónde se llegue.
     //
-    // En el L7 las reglas verificaban el precio de cada ítem contra el
-    // catálogo, así que la causa más frecuente de un rechazo era que un precio
-    // hubiera cambiado mientras el producto estaba en el carrito; el mensaje
-    // mandaba a revisarlo. Esa regla ya no existe: el modelo de esta homework
-    // guarda los ítems como un array, y las reglas de Firestore no pueden
-    // recorrer arrays para comparar precios.
+    //   · Al crear una orden  → lo más probable es que cambió el precio de un
+    //                            producto que estaba en el carrito.
+    //   · Al leer una orden   → puede ser ajena, inexistente, o la sesión venció.
+    //   · Al cambiar un estado → falta el rol de admin, o la transición no vale.
     //
-    // Mantener aquel texto mandaría al usuario a revisar un carrito que no
-    // tiene nada malo, mientras la causa real queda oculta. Hoy las causas
-    // posibles son: la sesión expiró, o se intentó tocar una orden ajena. El
-    // mensaje apunta a la primera, que es la única accionable por el usuario.
+    // Poner acá el texto de cualquiera de esos casos le mentiría a los otros dos.
+    // Por eso cada pantalla que necesita ser más específica traduce este código a
+    // su propio mensaje: CheckoutPage apunta al carrito y OrderDetailPage cubre
+    // las tres causas de lectura sin confirmar ninguna.
     //
     // Deliberadamente NO se menciona la existencia de órdenes de otros: quien
     // esté probando accesos ajenos no debe recibir confirmación de nada.
     if (error.code === "permission-denied" || error.code === "unauthenticated") {
       return new OrderError(
         ORDER_ERROR_CODES.PERMISSION_DENIED,
-        "No tenés permiso para hacer esta operación. Es posible que tu sesión haya expirado: volvé a iniciar sesión e intentá de nuevo.",
+        "No pudimos completar la operación. Revisá que tu sesión siga activa y volvé a intentarlo.",
         { cause: error },
       );
     }

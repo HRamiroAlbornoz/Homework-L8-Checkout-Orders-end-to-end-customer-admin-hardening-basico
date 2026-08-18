@@ -33,21 +33,27 @@ function toDomainOrder(id: string, doc: OrderDoc): Order {
  *
  * ⚠ POR QUÉ EXISTE ESTA VERSIÓN "BLANDA" ADEMÁS DEL CONVERTER
  *
- * Las reglas de Firestore no pueden recorrer un array, así que no hay forma de
- * validar la forma de cada ítem al escribir. Un cliente autenticado puede
- * escribir desde la consola del navegador una orden con `items: [1, 2, 3]`: pasa
- * las reglas (es una lista, tiene entre 1 y 50 elementos) pero no pasa el schema
- * al leer.
+ * Es defensa en profundidad. Hoy las reglas validan cada ítem por índice (ver
+ * firestore.rules), así que una orden con `items: [1, 2, 3]` se rechaza al
+ * escribirla — está comprobado contra Firestore real en `npm run verify:rules`.
+ * Pero eso no alcanza para confiar el listado a la validación estricta:
  *
- * Si el listado usara la validación estricta, ESE ÚNICO documento haría fallar
- * la consulta entera — y como las reglas prohíben borrar órdenes, quedaría roto
- * para siempre: su propio historial y, peor, el listado sin filtrar del panel de
- * administración. Una denegación de servicio que cualquier usuario podría
- * provocar en dos líneas.
+ *   · Pueden existir documentos escritos ANTES de que esa regla existiera. En
+ *     este proyecto los hubo: la primera versión de la rama los aceptaba.
+ *   · Las reglas se despliegan aparte del código. Un entorno con reglas viejas
+ *     corre este mismo bundle.
+ *   · El tope de 10 ítems es el techo de get() de Firestore, no una decisión de
+ *     producto. Si algún día hay que bajarlo, la verificación por índice se
+ *     acorta y vuelve a haber posiciones sin validar.
+ *
+ * Lo que está en juego si un documento inválido llega a un listado estricto: ESE
+ * ÚNICO documento haría fallar la consulta entera, y como las reglas prohíben
+ * borrar órdenes, quedaría roto para siempre — su propio historial y, peor, el
+ * listado sin filtrar del panel de administración.
  *
  * Por eso los listados omiten los documentos inválidos en vez de romperse. No se
  * silencian: se registran en la consola con su id, para poder diagnosticarlos.
- * En una aplicación con monitoreo, esta línea iría a un servicio de seguimiento
+ * En una aplicación con monitoreo, esa línea iría a un servicio de seguimiento
  * de errores en lugar de a la consola.
  *
  * La lectura de UNA orden puntual (getOrderById) sigue usando el converter
