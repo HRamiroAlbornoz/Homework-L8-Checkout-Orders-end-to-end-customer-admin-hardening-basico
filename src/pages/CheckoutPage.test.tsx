@@ -82,6 +82,9 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // Si un test con temporizadores falsos falla a mitad, sin esto quedarían
+  // falsos para todos los que siguen y los fallos aparecerían lejos de la causa.
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -303,5 +306,81 @@ describe("CheckoutPage — carrito vacío", () => {
     expect(screen.getByText(/tu carrito está vacío/i)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /confirmar compra/i })).not.toBeInTheDocument();
     expect(createOrderFromCart).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("CheckoutPage — la compra tarda demasiado", () => {
+  // Estos tests usan temporizadores falsos: esperar 8 segundos reales haría la
+  // suite mucho más lenta sin verificar nada más.
+  //
+  // Y usan fireEvent en vez de userEvent, igual que el test de doble envío:
+  // userEvent espera promesas que dependen del reloj, y con el reloj congelado
+  // esa espera nunca termina — el test se cuelga en vez de fallar.
+
+  /** Deja la página lista con la compra en curso y el reloj adelantado. */
+  function comprarYEsperar(milisegundos: number) {
+    renderCheckout();
+    act(() => {
+      fireEvent.click(getConfirmButton());
+    });
+    act(() => {
+      vi.advanceTimersByTime(milisegundos);
+    });
+  }
+
+  it("avisa cuando la escritura no responde, sin tratarlo como un error", () => {
+    vi.useFakeTimers();
+    // La promesa nunca se resuelve: es exactamente lo que hace Firestore sin
+    // conexión. setDoc() NO rechaza — encola la escritura y deja la promesa
+    // pendiente. Se comprobó en el navegador que sin este aviso el botón queda
+    // en "Confirmando compra..." indefinidamente, sin ninguna señal.
+    vi.mocked(createOrderFromCart).mockReturnValue(new Promise<string>(() => {}));
+
+    comprarYEsperar(9000);
+
+    const aviso = screen.getByText(/tardando más de lo normal/i);
+    // role="status" y no "alert": la compra sigue en curso, no falló.
+    expect(aviso.closest('[role="status"]')).not.toBeNull();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("no se adelanta: una red apenas lenta no dispara el aviso", () => {
+    vi.useFakeTimers();
+    vi.mocked(createOrderFromCart).mockReturnValue(new Promise<string>(() => {}));
+
+    comprarYEsperar(7000);
+
+    expect(screen.queryByText(/tardando más de lo normal/i)).not.toBeInTheDocument();
+  });
+
+  it("le dice a la persona lo único que NO tiene que hacer", () => {
+    vi.useFakeTimers();
+    vi.mocked(createOrderFromCart).mockReturnValue(new Promise<string>(() => {}));
+
+    comprarYEsperar(9000);
+
+    // La advertencia no es decorativa: el proyecto usa la caché EN MEMORIA de
+    // Firestore, así que la escritura encolada se pierde al cerrar o recargar la
+    // pestaña. Prometer que "se registra igual" sin aclararlo sería mentir.
+    expect(screen.getByText(/no cierres ni recargues esta pestaña/i)).toBeInTheDocument();
+  });
+
+  it("cancela el aviso cuando la compra termina a tiempo", async () => {
+    vi.useFakeTimers();
+    vi.mocked(createOrderFromCart).mockResolvedValue("orden-rapida");
+
+    renderCheckout();
+    await act(async () => {
+      fireEvent.click(getConfirmButton());
+    });
+    act(() => {
+      vi.advanceTimersByTime(30000);
+    });
+
+    // Si el temporizador no se cancelara, el aviso aparecería encima de la
+    // confirmación de una compra que ya salió bien.
+    expect(screen.queryByText(/tardando más de lo normal/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/gracias por tu compra/i)).toBeInTheDocument();
   });
 });

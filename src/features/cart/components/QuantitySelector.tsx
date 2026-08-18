@@ -24,6 +24,18 @@ export function QuantitySelector({ productName, quantity, onChange }: QuantitySe
         // Cada botón necesita un nombre accesible propio: en un carrito con
         // varias filas habría muchos botones "−" indistinguibles entre sí.
         aria-label={`Quitar una unidad de ${productName}`}
+        // Se deshabilita en 1, igual que el botón "+" al llegar al tope.
+        //
+        // Antes no lo estaba, y pulsarlo con una sola unidad ELIMINABA el
+        // producto del carrito sin avisar. No era un error de cálculo —el
+        // reducer lo quita cuando la cantidad llega a 0— pero sí una sorpresa:
+        // el botón de "restar uno" borraba la línea entera, mientras que vaciar
+        // el carrito sí pedía confirmación. Dos acciones destructivas con
+        // criterios opuestos.
+        //
+        // Para eliminar ya existe un botón propio y explícito en cada fila
+        // ("Eliminar X del carrito"), así que no se pierde ninguna capacidad.
+        disabled={quantity <= 1}
         onClick={() => onChange(quantity - 1)}
       >
         −

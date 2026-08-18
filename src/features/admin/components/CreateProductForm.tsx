@@ -134,7 +134,13 @@ export function CreateProductForm() {
 
   return (
     <form className="create-product-form" onSubmit={handleSubmit} noValidate>
-      <h2>Nuevo producto</h2>
+      {/*
+        Este formulario NO lleva encabezado propio: la sección que lo contiene ya
+        se titula "Alta de productos" (ver AdminPage.tsx). Tenía un
+        encabezado propio, que quedó redundante al sumarse el de la sección: dos
+        encabezados hermanos diciendo casi lo mismo ensucian la navegación por
+        encabezados de un lector de pantalla.
+      */}
 
       <FormField
         id="product-name"

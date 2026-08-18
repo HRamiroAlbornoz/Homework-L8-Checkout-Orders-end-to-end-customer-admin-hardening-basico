@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router";
 import { EmptyState } from "../components/states/EmptyState";
 import { useAuth } from "../contexts/AuthContext";
@@ -7,6 +7,17 @@ import { useDocumentTitle } from "../hooks/useDocumentTitle";
 import { formatPrice } from "../lib/formatPrice";
 import { mapOrderError, type OrderError } from "../lib/orderErrors";
 import { createOrderFromCart, createOrderId } from "../services/ordersService";
+
+
+// Cuánto esperamos antes de avisar que la compra está tardando.
+//
+// No es un timeout: la escritura sigue en curso y va a completarse. Es solo el
+// momento en que dejamos de mostrar "Confirmando compra..." a secas y le
+// explicamos a la persona qué está pasando.
+//
+// 8 segundos es suficiente para no dispararse con una red lenta normal, y poco
+// como para que nadie sienta que la app se colgó sin avisar.
+const AVISO_DE_DEMORA_MS = 8000;
 
 export function CheckoutPage() {
   // Un solo título para las tres pantallas de esta página (compra pendiente,
@@ -45,6 +56,43 @@ export function CheckoutPage() {
   // justamente lo que una variable común dentro del componente no haría.
   const pendingOrderIdRef = useRef<string | null>(null);
 
+  // Aviso de demora.
+  //
+  // ⚠ POR QUÉ ESTO HACE FALTA, Y POR QUÉ NO ES UN TIMEOUT
+  //
+  // Sin conexión, setDoc() NO rechaza: Firestore encola la escritura localmente
+  // y la promesa queda pendiente hasta que haya red. Se comprobó en el navegador
+  // que el botón se queda en "Confirmando compra..." indefinidamente —45 segundos
+  // y sigue— sin error, sin salida y sin ninguna señal de qué está pasando.
+  //
+  // Por eso el código NETWORK_ERROR con retryable: true casi nunca se dispara en
+  // un corte de red real: está pensado para fallos que el servidor sí rechaza.
+  //
+  // La escritura no se cancela, porque va a completarse sola cuando vuelva la
+  // conexión. Lo único que se agrega es explicarle a la persona qué está pasando
+  // y qué NO tiene que hacer.
+  const [muestraAvisoDeDemora, setMuestraAvisoDeDemora] = useState(false);
+  const temporizadorDeDemoraRef = useRef<number | null>(null);
+
+  function cancelarAvisoDeDemora(): void {
+    if (temporizadorDeDemoraRef.current !== null) {
+      clearTimeout(temporizadorDeDemoraRef.current);
+      temporizadorDeDemoraRef.current = null;
+    }
+    setMuestraAvisoDeDemora(false);
+  }
+
+  // Limpieza al desmontar: si alguien se va de la página mientras la compra está
+  // en curso, el temporizador tiene que morir con ella. Si no, dispararía un
+  // setState sobre un componente que ya no existe.
+  useEffect(() => {
+    return () => {
+      if (temporizadorDeDemoraRef.current !== null) {
+        clearTimeout(temporizadorDeDemoraRef.current);
+      }
+    };
+  }, []);
+
   async function handleConfirmPurchase(): Promise<void> {
     if (isSubmittingRef.current) {
       return;
@@ -53,6 +101,14 @@ export function CheckoutPage() {
 
     setError(null);
     setIsSubmitting(true);
+
+    // El aviso arranca en cada intento y se cancela apenas la operación termina,
+    // salga bien o mal.
+    setMuestraAvisoDeDemora(false);
+    temporizadorDeDemoraRef.current = window.setTimeout(
+      () => setMuestraAvisoDeDemora(true),
+      AVISO_DE_DEMORA_MS,
+    );
 
     // ??= asigna solo si todavía es null. En el primer intento genera el id; en
     // los reintentos deja el que ya había. Generarlo acá y no al montar la
@@ -79,6 +135,7 @@ export function CheckoutPage() {
     } catch (caughtError) {
       setError(mapOrderError(caughtError));
     } finally {
+      cancelarAvisoDeDemora();
       setIsSubmitting(false);
       isSubmittingRef.current = false;
     }
@@ -146,6 +203,17 @@ export function CheckoutPage() {
         Total ({totalItems} {totalItems === 1 ? "unidad" : "unidades"}):{" "}
         <strong>{formatPrice(totalPrice)}</strong>
       </p>
+
+      {muestraAvisoDeDemora && (
+        // role="status" y no "alert": esto NO es un error. La compra sigue en
+        // curso y probablemente termine bien; es información, no urgencia.
+        <p className="checkout__slow" role="status">
+          Esto está tardando más de lo normal. Puede que te hayas quedado sin
+          conexión: la compra se va a registrar sola en cuanto vuelva.{" "}
+          <strong>No cierres ni recargues esta pestaña</strong>, o vas a tener
+          que empezar de nuevo.
+        </p>
+      )}
 
       {error && (
         // role="alert" hace que el lector de pantalla lea el mensaje apenas
