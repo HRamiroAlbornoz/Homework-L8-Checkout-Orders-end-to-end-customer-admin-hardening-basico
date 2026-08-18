@@ -99,13 +99,26 @@ describe("CartPage — cambiar cantidades", () => {
     expect(screen.getByText(/total \(2 unidades\)/i)).toBeInTheDocument();
   });
 
-  it("bajar de 1 a 0 elimina la fila del carrito", async () => {
+  it("deshabilita el botón − cuando queda una sola unidad", () => {
+    renderCartPage(cartWithTwoProducts);
+
+    // Antes este botón NO estaba deshabilitado, y pulsarlo con una sola unidad
+    // eliminaba el producto del carrito sin avisar: el botón de "restar uno"
+    // borraba la línea entera, mientras que vaciar el carrito sí pedía
+    // confirmación. Dos acciones destructivas con criterios opuestos.
+    expect(
+      screen.getByRole("button", { name: /quitar una unidad de adidas gazelle/i }),
+    ).toBeDisabled();
+  });
+
+  it("para eliminar una fila hay un botón propio y explícito", async () => {
     const user = userEvent.setup();
     renderCartPage(cartWithTwoProducts);
 
-    // Adidas Gazelle está en cantidad 1: un click en "−" la lleva a 0.
+    // No se pierde ninguna capacidad al deshabilitar el "−": eliminar sigue
+    // siendo posible, pero por una acción que dice lo que hace.
     await user.click(
-      screen.getByRole("button", { name: /quitar una unidad de adidas gazelle/i }),
+      screen.getByRole("button", { name: /eliminar adidas gazelle del carrito/i }),
     );
 
     expect(screen.getAllByRole("listitem")).toHaveLength(1);

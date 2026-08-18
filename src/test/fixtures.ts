@@ -1,4 +1,5 @@
 import type { CartItem, CartItemInput, CartState } from "@/features/cart/types";
+import type { Order } from "@/types/order";
 import type { Product } from "@/types/product";
 
 // Datos de prueba compartidos por toda la suite.
@@ -51,4 +52,24 @@ export function makeCartItem(overrides: Partial<CartItem> = {}): CartItem {
 // carrito con ítems declaran los totales esperados como números literales.
 export function makeEmptyCartState(): CartState {
   return { items: [], totalItems: 0, totalPrice: 0 };
+}
+
+// Una orden ya persistida, tal como la devuelve el service (con las fechas ya
+// convertidas a Date por el converter).
+//
+// El total del default (200) es coherente con sus ítems (100 × 2), pero los
+// tests que necesitan comprobar el CÁLCULO del total no usan esta fixture:
+// declaran sus propios números. Si la fixture calculara el total con la misma
+// lógica que el service, un error en esa lógica estaría en los dos lados y el
+// test pasaría sin detectar nada — el mismo criterio que ya aplica el carrito.
+export function makeOrder(overrides: Partial<Order> = {}): Order {
+  return {
+    id: "orden-1",
+    userId: "uid-1",
+    items: [{ productId: "p-1", name: "Nike Air Max 90", priceAtPurchase: 100, quantity: 2 }],
+    total: 200,
+    status: "pending",
+    createdAt: new Date("2026-01-15T10:00:00Z"),
+    ...overrides,
+  };
 }

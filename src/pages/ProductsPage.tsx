@@ -78,7 +78,11 @@ export function ProductsPage() {
       <div aria-live="polite">
         {loading && <LoadingState />}
         {!loading && error && (
-          <ErrorState message={error} onRetry={() => loadFirstPage(buildQueryParams(categoryId, searchPrefix))} />
+          <ErrorState
+            message={error}
+            onRetry={() => loadFirstPage(buildQueryParams(categoryId, searchPrefix))}
+            retryLabel="Reintentar la consulta de productos"
+          />
         )}
         {!loading && !error && products.length === 0 && (
           <EmptyState message={buildEmptyMessage(searchPrefix, categoryId)} />

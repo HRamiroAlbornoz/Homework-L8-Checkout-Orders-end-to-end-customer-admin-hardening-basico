@@ -1,312 +1,380 @@
-# Notas de uso de IA — Catálogo escalable
+# Notas de uso de IA — Checkout + Orders end-to-end
 
-Este documento deja evidencia de cómo se usó IA (Claude) durante el desarrollo: los prompts obligatorios del enunciado, un resumen de las respuestas, y qué se aceptó/rechazó de cada una y por qué. También incluye decisiones de arquitectura que surgieron durante la implementación real (no solo de los prompts "oficiales"), porque fueron parte real del proceso de auditoría con IA.
+Este documento deja evidencia de cómo se usó IA (Claude) durante el desarrollo: los cuatro prompts obligatorios del enunciado, un resumen de las respuestas, y **qué se aceptó, qué se rechazó y cómo se verificó cada cosa**.
+
+La IA se usó como **auditora**, no como generadora de la solución completa. La diferencia se nota sobre todo en las secciones finales: las tres rondas de auditoría que corrió el proyecto —revisión de código, revisión de seguridad y un recorrido completo en el navegador— y el registro de las veces que la IA se equivocó. Una respuesta aceptada sin verificar no es una auditoría, es un acto de fe.
 
 ---
 
-## Prompt 1 — getDocs vs onSnapshot (arquitectura y costo)
+## Prompt 1 — Auditoría del modelo `Order` y riesgos de historial
 
 **Prompt (copiado tal cual del enunciado):**
-> Estoy implementando un catálogo de productos en React+TS con Firestore. Necesito filtros por categoría, búsqueda por prefijo y paginación con "Cargar más". ¿Por qué conviene usar getDocs en vez de onSnapshot para este caso? Considerá costo de lecturas, UX, y simplicidad. Respondé con pros/contras y una recomendación final.
+> Estoy implementando un modelo Order en Firestore con items como snapshot (name, priceAtPurchase, quantity). ¿Qué campos mínimos recomiendas para que el historial sea consistente y auditable? ¿Qué errores comunes ves si rehidrato desde products?
 
 **Resumen de la respuesta:**
 
-| | `getDocs` (lectura puntual) | `onSnapshot` (listener en tiempo real) |
-|---|---|---|
-| Costo | Predecible: una lectura por consulta explícita | Menos predecible: cada escritura que matchea la query recalcula el snapshot y cuenta como lectura adicional |
-| Paginación con cursor | Encaja naturalmente: cada "página" es una llamada puntual con `startAfter(lastDoc)` | Se complica: el listener se re-dispara solo con cambios en tiempo real, hay que gestionar múltiples suscripciones por página o acumular estado manualmente |
-| UX | Suficiente para un catálogo de lectura — el usuario dispara la carga (filtro, búsqueda, "cargar más") | Da actualizaciones en vivo si otro usuario cambia datos, pero eso no es un requisito de este catálogo |
-| Simplicidad | Menos código: no hay que gestionar `unsubscribe()` en cleanup de cada página | Requiere manejar la desuscripción correctamente en cada `useEffect` para evitar leaks |
+Campos mínimos recomendados: `userId` (dueño), `items[]` con la foto completa de cada producto, `total`, `status`, `createdAt` puesto por el servidor y `updatedAt` opcional.
 
-**Recomendación final de la IA:** usar `getDocs` para este caso — el catálogo es de solo lectura, no necesita sincronización en tiempo real, y la combinación filtro+búsqueda+paginación por cursor es mucho más simple de razonar con lecturas puntuales. `onSnapshot` tendría sentido en una pantalla donde la actualización en vivo es parte del valor del producto (ej: un dashboard colaborativo o un carrito compartido), no en un catálogo de navegación.
+Errores de rehidratar desde `products`:
 
-**Decisión: ACEPTADO.** Todo el proyecto usa `getDocs` (`src/services/productsService.ts`). No se usó `onSnapshot` en ningún punto.
+| Riesgo | Qué pasa |
+|---|---|
+| El precio cambia | El historial muestra un importe distinto al que se cobró |
+| El producto se elimina | La línea de la orden queda sin nombre ni precio, o directamente rota |
+| El producto se renombra | La orden dice que se compró algo que el cliente nunca vio con ese nombre |
+| Lecturas extra | Mostrar 20 órdenes de 3 ítems dispara 60 lecturas adicionales de `products` |
+
+**Decisión: ACEPTADO.** El modelo de `src/types/order.ts` guarda exactamente esos campos. El nombre `priceAtPurchase` —y no `price`— es deliberado: dice que es el precio *de ese momento*.
+
+**Verificación:** `src/services/orderConverter.test.ts` comprueba que el converter devuelva los ítems tal como se guardaron, sin consultar el catálogo. En el navegador se confirmó que el detalle de una orden muestra `$26.000` para un producto cuyo precio de catálogo podría cambiar después.
+
+### El punto donde se rechazó el contrato del enunciado… y se aceptó igual
+
+El proyecto anterior (L7) resolvía este mismo problema **al revés**: guardaba cada ítem como un documento propio en una subcolección `orders/{id}/items/{itemId}`, y **no guardaba el total**.
+
+No era una decisión organizativa. Las reglas de Firestore **no pueden recorrer un array**, pero **sí pueden leer otros documentos con `get()`**. Con un documento por ítem, cada uno tenía su propia evaluación de regla, y ahí se podía comparar su precio contra el del catálogo:
+
+```
+request.resource.data.unitPrice == get(/products/$(productId)).data.price
+```
+
+Eso cerraba un agujero concreto: alguien que editara su `localStorage` no podía comprar más barato.
+
+**El contrato de esta homework exige el modelo opuesto**, y es explícito en que no se negocia.
+
+**Primera decisión (equivocada): adoptar el modelo y dar la verificación por perdida.** Se documentó como trade-off consciente en tres lugares. La revisión de seguridad posterior demostró que **no era un trade-off aceptable sino un agujero explotable**, y que documentar un hueco no lo cierra. Ver la sección del `/security-review` más abajo.
+
+**Decisión final: se recuperó la verificación sin abandonar el modelo del contrato.** Las reglas no pueden *recorrer* un array, pero sí *acceder a una posición* con notación de corchetes — que es justamente lo que la documentación oficial recomienda para validar listas. `firestore.rules` desenrolla la comprobación de la posición 0 a la 9 y contrasta cada precio contra `products`.
+
+De ahí sale el tope de **10 ítems por orden**: Firestore permite un máximo de 10 llamadas a `get()` por request de un solo documento, y cada ítem consume una.
+
+**Mitigación adicional:** el service **recalcula** el total en vez de copiar `cart.totalPrice`, y las reglas lo verifican contra la suma de las líneas. Hay un test que fuerza lo primero: se le pasa un carrito cuyo `totalPrice` dice `999999` y se verifica que se guarde `250`.
 
 ---
 
-## Prompt 2 — Validación de query, cursores e índices
+## Prompt 2 — Revisión del flujo de checkout y casos borde
 
 **Prompt (copiado tal cual del enunciado):**
-> Estoy armando una query en Firestore para: where(categoryId == X) opcional, orderBy(nameLower), búsqueda por prefijo con startAt(prefix) y endAt(prefix + ''), y paginación con limit(20) + startAfter(lastDoc DocumentSnapshot). ¿Qué errores típicos puedo cometer (duplicados, índices faltantes, orderBy inconsistente)? ¿Qué índices podrían ser necesarios y cómo se resuelve "Missing index" correctamente?
+> Revisa mi flujo de checkout (carrito → create order → confirmación). ¿Qué casos borde debería cubrir en UI (doble submit, errores de red, usuario no logueado, carrito vacío) y cómo debería comportarse?
 
 **Resumen de la respuesta:**
-- **Duplicados**: usar `startAt(cursor)` en vez de `startAfter(cursor)` para "cargar más" repite el último documento de la página anterior, porque `startAt` es inclusivo y `startAfter` es exclusivo.
-- **`orderBy` inconsistente**: si la query "sin búsqueda" no ordena por el mismo campo que la query "con búsqueda" (`nameLower`), el cursor (`lastDoc`) deja de tener sentido entre una página y la siguiente — hay que ordenar siempre por `nameLower`, haya o no búsqueda activa.
-- **Índices compuestos faltantes**: combinar `where('categoryId', '==', ...)` con `orderBy('nameLower')` (más el rango de prefijo) requiere un índice compuesto que Firestore no crea automáticamente. La consulta falla con un error `failed-precondition` que incluye un link directo a la consola para crearlo con un click; el índice tarda 1-2 minutos en construirse.
-- **Cursor por snapshot vs por valores de campo**: `startAfter` acepta un `DocumentSnapshot` completo (más robusto) o una lista de valores de campo en el mismo orden que el `orderBy` — mezclar ambos enfoques entre páginas rompe la paginación.
 
-**Decisión: ACEPTADO, con evidencia real.** Durante la verificación manual de este proyecto, justo se disparó el error real de "missing index" al combinar filtro de categoría + búsqueda por prefijo (que no se había probado en conjunto hasta ese momento). Se resolvió siguiendo exactamente el flujo que describe esta respuesta: Firestore mostró el link, se creó el índice desde la consola, y la consulta combinada funcionó sin más cambios de código. Esto confirma que la recomendación era correcta y no solo teórica.
+1. **Doble submit**: deshabilitar el botón no alcanza. `disabled` depende de que React vuelva a renderizar, y eso ocurre *después* de que termina el manejador del evento; dos clics muy rápidos pueden dispararse ambos antes de ese re-render. Hace falta un segundo cerrojo con `useRef`, que se actualiza en el acto.
+2. **Errores de red**: no vaciar el carrito, mostrar un mensaje entendible y permitir reintentar.
+3. **Usuario no logueado / carrito vacío**: validar *antes* de tocar la red, para dar un mensaje específico en vez de un rechazo genérico de permisos.
+4. **Efectos del éxito dentro del `try`**, nunca en el `finally`: en el `finally` se ejecutarían también cuando la creación falla, vaciándole el carrito a alguien cuya compra nunca se registró.
+5. **Idempotencia**: generar el `orderId` antes de escribir y reutilizarlo en los reintentos, usando `setDoc` en vez de `addDoc`.
+
+**Decisión: ACEPTADO en su totalidad.** Los puntos 1 a 4 ya venían del L7 y se conservaron. El punto 5 se implementó en esta homework (`createOrderId()` + `pendingOrderIdRef`).
+
+**Verificación:** `CheckoutPage.test.tsx` cubre los cinco. El test del doble submit usa `fireEvent` dentro de un mismo `act()` y **no** `userEvent`, a propósito: `userEvent` espera a que React re-renderice entre clics, así que el segundo ya encontraría el botón deshabilitado y el test pasaría aunque no hubiera ninguna protección real.
+
+### Un caso borde que la respuesta NO cubrió
+
+La idempotencia con `setDoc` tiene una trampa que apareció al razonar el flujo completo, y que ninguna de las respuestas mencionó:
+
+> Si el primer intento **sí se escribió** y lo que se perdió fue la respuesta (se cortó la red después del commit), el usuario ve un error y reintenta. Pero ese segundo `setDoc` sobre un documento que ya existe **deja de ser un `create` para las reglas y pasa a ser un `update`** — y el `update` solo lo puede hacer un administrador. El cliente recibiría `PERMISSION_DENIED` por una orden que en realidad se creó bien.
+
+**Solución implementada:** ante un `permission-denied` en la creación, el service comprueba si el documento ya existe y pertenece al usuario; si es así, resuelve el intento como éxito. Se hace **dentro del `catch`** y no como chequeo previo, para no pagar una lectura extra en el camino feliz.
+
+**Verificación:** tres tests en `ordersService.test.ts` cubren los tres escenarios: el documento ya existe y es suyo (éxito), no existe (se propaga el error), y existe pero es **de otro usuario** (se propaga). Ese último previene algo concreto: sin comprobar el `userId`, adivinar el id de una orden ajena haría que el checkout respondiera *"listo, tu compra está registrada"* mostrando el id de la compra de otra persona.
 
 ---
 
-## Prompt opcional — Code review del service/context
+## Prompt 3 — Revisión de rules y posibles bypass
 
 **Prompt (copiado tal cual del enunciado):**
-> Te paso las firmas y responsabilidades: ProductsService.listProducts(params) devuelve items + lastDoc; ProductsContext tiene loadFirstPage/loadMore, separa loading y loadingMore, resetea al cambiar params y deduplica por id. ¿Qué mejorarías sin agregar librerías ni salirte del alcance?
+> Estas son mis Firestore Rules para orders: owner read, admin read all, admin update solo status. ¿Qué bypass o fallas comunes hay? ¿Cómo puedo restringir updates por campo usando diff().affectedKeys()?
 
-**Resumen de la respuesta / sugerencias recibidas:**
-1. Tipar el `FirestoreDataConverter` con **dos genéricos** (`<Product, ProductDoc>`) en vez de uno solo, para distinguir explícitamente el modelo de dominio del modelo crudo de Firestore (sin `id`).
-2. Evitar deduplicar con `.filter()` + `.findIndex()` (O(n²)) y usar un `Map` indexado por `id` (O(n)) al combinar páginas.
-3. Guardar los parámetros vigentes (filtro/búsqueda) en un `ref`, no en el estado, ya que `loadMore` los necesita pero no deberían disparar un re-render por sí solos.
-4. No memoizar el `value` del context de entrada — priorizar código simple y correcto primero; memoizar solo si aparece un problema de performance medible.
+**Resumen de la respuesta:**
 
-**Decisiones:**
-- **ACEPTADO (1)**: se implementó `FirestoreDataConverter<Product, ProductDoc>` con los dos genéricos en `productsService.ts`.
-- **ACEPTADO (2)**: `mergeUniqueById` en `ProductsContext.tsx` usa `Map`, no `filter`/`findIndex`.
-- **ACEPTADO (3)**: `currentParamsRef` es un `useRef`, no un `useState`.
-- **ACEPTADO (4)**: el `value` del `ProductsProvider` no está memoizado a propósito; es una decisión consciente de simplicidad para el alcance de esta homework, documentada como código a revisar si en el futuro se detectan re-renders innecesarios.
+- **`keys()` no sirve para restringir un update.** `request.resource.data.keys()` describe el **documento final completo**, no el conjunto de cambios: con él habría que listar todos los campos de la orden y no se estaría restringiendo nada. Lo correcto es `request.resource.data.diff(resource.data).affectedKeys()`, que son los campos **efectivamente modificados**.
+- **`hasOnly()` es preferible a `hasAny()` negado**: `hasOnly(['status','updatedAt'])` define una lista blanca, así que un campo nuevo que se agregue al documento en el futuro queda protegido por defecto.
+- **Bypass típicos**: crear una orden a nombre de otro (`userId` sin comparar contra `request.auth.uid`), inyectar campos que la app no espera, insertar una orden ya marcada como completada, y falsear `createdAt` con una fecha del cliente en vez de `serverTimestamp()`.
+- **Validar `createdAt == request.time`** es el patrón oficial para forzar que el campo venga del servidor.
 
----
+**Decisión: ACEPTADO, y ampliado con tres cosas que la respuesta no mencionó.**
 
-## Otras decisiones tomadas durante el desarrollo (con auditoría de IA)
+**1. El orden de las condiciones en `allow read` cuesta dinero.**
 
-Estas no vinieron de los tres prompts de arriba, sino de decisiones de diseño e implementación que se discutieron y verificaron en el momento, con el mismo criterio de "aceptar o rechazar con justificación".
+`isAdmin()` hace un `get()` sobre `users/{uid}`, y cada `get()` dentro de una regla es una **lectura facturable** —que se cobra incluso cuando la regla termina rechazando—. Las expresiones cortocircuitan, así que el orden importa:
 
-### Aceptadas
+```
+// Con el dueño primero, un cliente que lista 20 órdenes NO dispara ningún get()
+allow read: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+```
 
-- **Estructura de carpetas plana** (`types/`, `services/`, `contexts/`, `hooks/`, `components/`, `pages/`) en vez del patrón `features/`. Justificación: el proyecto tiene un solo dominio (productos); `features/products/...` agregaría un nivel de anidación sin beneficio real a este alcance.
-- **`useProducts()` vive en el mismo archivo que `ProductsProvider`** (no en un archivo aparte en `hooks/`), por simplicidad. Esto dispara la regla de lint `react-refresh/only-export-components` (afecta granularidad de Fast Refresh en desarrollo); se silenció puntualmente con un comentario explicando el motivo, en vez de desactivar la regla globalmente.
-- **`toFirestore` del converter lanza un error explícito** en vez de intentar mapear campos: la interfaz `FirestoreDataConverter` exige implementarlo, pero este catálogo nunca escribe productos desde el frontend (es de solo lectura). Se descubrió durante la implementación que un intento de mapeo con destructuring no compilaba (la interfaz tiene dos firmas superpuestas para escrituras completas y parciales); en vez de forzar los tipos, se optó por la solución más simple y honesta.
-- **`endAt(prefix + '')`** con el carácter Unicode de "fin de rango", tal como documenta Firebase oficialmente. Nota curiosa: ese carácter pertenece a un rango Unicode de uso privado y no tiene glifo visible, por lo que en el editor y en las herramientas de lectura de archivos aparece "vacío" — se verificó a nivel de bytes (codificación UTF-8 `EF A3 BF`) que el carácter correcto sí estaba presente antes de asumir que había un bug.
-- **Script de seed con su propia inicialización de Firebase y su propia carga de variables de entorno** (no reutiliza `src/lib/firebase.ts` ni importa directamente `src/lib/env.ts`). Motivo técnico real: el script corre con Node bajo resolución de módulos `nodenext` (exige extensión `.js` en imports relativos), mientras que el resto de la app usa la resolución `bundler` de Vite (extensión opcional); además `env.ts` lee `import.meta.env`, que solo existe en el contexto de Vite, no en un script de Node plano. Se extrajo el schema de Zod a `src/lib/envSchema.ts` (sin efectos secundarios) para que ambos entornos lo reutilicen sin duplicar la lista de variables, y el script carga `.env` con `process.loadEnvFile()` (API nativa de Node) parseando contra `process.env`.
-- **Categorías centralizadas en `src/constants/categories.ts`**, usadas tanto por `CategoryFilter` (UI) como por `scripts/seed.ts` (datos), para que nunca queden desincronizadas.
-- **Reglas de Firestore abiertas (`allow read, write: if true`) sin fecha de expiración**, en vez del "modo de prueba" estándar (que expira solo). Aceptado únicamente porque este proyecto es una entrega educativa que no se va a desplegar públicamente ni subir a un repositorio compartido; si se reutilizara el proyecto Firebase para algo real, habría que volver a poner reglas con expiración o basadas en autenticación.
+Invertido, pagaría una lectura extra por cada documento del listado sin obtener nada a cambio.
 
-### Rechazadas (fuera de alcance, tal como pide el enunciado)
+**2. Validar la transición, no solo el valor.**
 
-- **Full-text / fuzzy search / "contains"**: Firestore no lo soporta nativamente; se necesitaría un servicio externo (Algolia, Meilisearch, Typesense). Mencionado solo como alternativa conceptual, nunca implementado.
-- **Paginación hacia atrás (`endBefore`/`limitToLast`)**: fuera del alcance del enunciado.
-- **Infinite scroll**: se implementó con botón "Cargar más", tal como pide el enunciado.
-- **Optimistic UI**: no aplica a un catálogo de solo lectura.
-- **TanStack Query / Zustand**: Context API alcanza para un solo dominio de datos server-side con esta complejidad; se dejó como alternativa descartada, no como necesidad futura inmediata.
-- **`onSnapshot`**: ver Prompt 1.
+Restringir el update a `status` impide tocar otros campos, pero **no** impide pasar de `completed` de vuelta a `pending`. Las reglas replican la máquina de estados de `src/features/orders/orderTransitions.ts`. La duplicación es deliberada: deshabilitar la opción en el `<select>` ayuda al usuario honesto, pero no detiene a nadie que llame al SDK desde la consola del navegador.
 
----
+**3. Exigir `updatedAt`, aunque el enunciado lo dé como opcional.**
 
-## Revisión de código con IA (post-implementación)
+Una orden que cambió de estado sin dejar constancia de cuándo es un registro peor que inútil para auditar. Las reglas exigen además que venga del servidor (`== request.time`).
 
-Una vez terminada la implementación (con todos los escenarios verificados manualmente en el navegador), se corrió una revisión de código asistida por IA sobre todo `src/` y `scripts/` — 8 agentes en paralelo cubriendo ángulos distintos (correctness línea por línea, comportamiento eliminado, rastreo cruzado entre archivos, reutilización, simplificación, eficiencia, "altitude"/profundidad de la solución, y cumplimiento de las reglas del CLAUDE.md), seguido de una verificación independiente de cada candidato antes de aceptarlo.
+**Verificación: 23 pruebas de caja negra, todas pasando.**
 
-### Falso positivo notable (rechazado tras verificar)
+Se escribió `scripts/verificarReglas.ts` (`npm run verify:rules`) en vez de probar a mano una sola vez. Cubre los tres casos obligatorios del enunciado y veinte más. Resultado completo en [`verificacion-reglas.txt`](verificacion-reglas.txt).
 
-Tres de los ocho agentes marcaron de forma independiente `endAt(prefix + '')` en `productsService.ts` como un bug ("falta el carácter, es un string vacío"). Se verificó con `charCodeAt` a nivel de bytes: el carácter Unicode `U+F8FF` está presente y es correcto — simplemente no tiene glifo visible en ningún editor o terminal (es un carácter del rango "uso privado" de Unicode), por lo que tanto humanos como IAs leyendo el archivo lo perciben como "vacío" sin estarlo. **Rechazado**: no se tocó ese código. Se documenta como advertencia para quien revise este archivo en el futuro (un profesor, otra herramienta) y se confunda con el mismo espejismo.
+**La decisión que sostiene todo el script:** usa el **SDK cliente**, no el de Admin. El SDK de Admin se saltea las reglas por diseño — con él, las 23 pruebas pasarían **sin verificar absolutamente nada**. Es el error que invalidaría el ejercicio entero, y está señalado en mayúsculas dentro del archivo.
 
-### Hallazgos confirmados y aceptados
+### Un hallazgo del testeo en navegador
 
-1. **Race condition en `loadFirstPage`** (`ProductsContext.tsx`): si el usuario cambiaba de filtro antes de que resolviera la consulta anterior, y la respuesta vieja resolvía después que la nueva, pisaba el estado con datos que ya no correspondían al filtro visible — violaba el requisito explícito del enunciado de "no mezclar resultados" al cambiar filtros. **Aceptado**: se agregó un contador de "generación" (`requestIdRef`) que descarta respuestas que quedaron obsoletas.
-2. **Mismo problema en `loadMore`**: una página pedida antes de cambiar de filtro podía mezclarse con los resultados del filtro nuevo y corromper el cursor de paginación. **Aceptado**: mismo mecanismo de generación aplicado.
-3. **Flash de `EmptyState` antes de `LoadingState`**: `initialState.loading` arrancaba en `false`, así que había un instante (antes de que el `useEffect` disparara la primera carga) donde se pintaba "Todavía no hay productos" en vez del spinner, anunciado de más a lectores de pantalla por el `aria-live="polite"`. **Aceptado**: `initialState.loading` ahora arranca en `true`.
-4. **Duplicación de la búsqueda `categoryId → label`** entre `ProductCard.tsx` y `ProductsPage.tsx`. **Aceptado**: se extrajo `getCategoryLabel()` a `constants/categories.ts`.
-5. **Magic number duplicado** (`2`, el mínimo de caracteres de búsqueda) entre `ProductsPage.tsx` (ya lo tenía como constante) y `productsService.ts` (lo repetía crudo) — violación directa de la regla "no magic numbers" del CLAUDE.md. **Aceptado**: constante `MIN_SEARCH_CHARS` centralizada en `constants/search.ts`.
-6. **Guard de `loadMore` vulnerable a doble-click**: leía `state.loadingMore`, que solo se actualiza en el próximo render de React, no al instante. Un doble click muy rápido podía disparar dos lecturas a Firestore para la misma página. **Aceptado**: reemplazado por un `useRef` que se lee/escribe sincrónicamente.
+Al probar `/orders/un-id-que-no-existe` apareció `PERMISSION_DENIED`, no "no encontrada". La causa: en un `get` sobre un documento inexistente, `resource` es `null`, así que `resource.data.userId` no se puede evaluar y la regla deniega.
 
-Se agregaron 2 tests de regresión nuevos en `ProductsContext.test.tsx` que simulan resolución de promesas fuera de orden — reproducen exactamente los escenarios de los hallazgos 1 y 2, y fallarían sin el fix aplicado.
+Eso es una propiedad de seguridad **deseable** —si "no existe" y "no es tuya" dieran errores distintos, alguien podría probar ids al azar y averiguar cuáles corresponden a órdenes reales—, pero el mensaje genérico le decía *"tu sesión expiró"* a quien simplemente tipeó mal la URL. Se corrigió con un mensaje que cubre las tres causas posibles sin confirmar ninguna.
 
 ---
 
-# Notas de uso de IA — Homework L7 (Release Candidate)
+## Prompt 4 — Revisión de queries e índices
 
-Todo el trabajo de este homework se hizo en colaboración con Claude (Claude Code). Las intervenciones se registran abajo en el formato que pide el enunciado. Los "prompts" son los pedidos reales de la conversación, no reconstrucciones posteriores.
+**Prompt (copiado tal cual del enunciado):**
+> Tengo queries en Firestore con where(userId==uid)+orderBy(createdAt desc) y where(status==X)+orderBy(createdAt desc). ¿Qué índices compuestos puedo necesitar y cómo diagnostico FAILED_PRECONDITION: requires an index?
 
-## Intervención 1 — Edge cases del `cartReducer`, priorizados por impacto
+**Resumen de la respuesta:**
 
-**Prompt**
+- Hacen falta dos índices compuestos: `userId ASC + createdAt DESC` y `status ASC + createdAt DESC`.
+- `FAILED_PRECONDITION` incluye un link directo que crea el índice en la consola. Tarda 1–2 minutos en construirse.
+- **Versionar `firestore.indexes.json`**: un índice creado a mano desde el link vive **solo en ese proyecto de Firebase**. Sin versionarlo, producción falla con una consulta que en desarrollo funciona.
+- **`orderBy` excluye en silencio** los documentos que no tengan ese campo: no hay error ni aviso, simplemente no aparecen. Una orden guardada sin `createdAt` desaparecería del historial y nadie se enteraría.
 
-> Vamos a hacer una Homework de Henry Boot Camp. [...] Analizá el enunciado y planificá.
->
-> (Y más adelante, sobre el reducer:) escribí `cartReducer.test.ts`, los casos del Paso 3.
+**Decisión: ACEPTADO en su totalidad.** Los dos índices están en `firestore.indexes.json` y se despliegan con `firebase deploy --only firestore:indexes`. El riesgo del `orderBy` se neutraliza en dos capas: el service siempre escribe `createdAt`, y las reglas **rechazan** cualquier orden que no lo traiga con `serverTimestamp()`.
 
-**Resumen de la respuesta**
+**Ampliación:** se agregó un código de error propio `MISSING_INDEX`, separado de `UNKNOWN_ERROR`. Firestore lo reporta como `failed-precondition`, pero ese código cubre **otras** precondiciones sin relación, así que el mapeo comprueba **dos cosas**: el código *y* que el mensaje mencione `index`. Sin esa segunda verificación, un `failed-precondition` de otra causa mandaría el diagnóstico para el lado equivocado.
 
-Propuso 16 tests agrupados por acción, priorizados así:
+Se marca como **no reintentable** a propósito: el índice tarda un par de minutos, así que un reintento inmediato falla igual y ofrecer "Reintentar" produciría el mismo error en bucle.
 
-1. **Consistencia de totales** — la falla de mayor impacto: mostrar "3 productos" con 2 en la lista.
-2. **Deduplicación** — que agregar el mismo producto no cree dos filas.
-3. **Cantidad 0 o negativa** — que elimine el ítem en vez de dejar un total negativo.
-4. **Aritmética de punto flotante** — `0.1 + 0.2` da `0.30000000000000004`.
-5. **Inmutabilidad** — que el reducer no mute el estado recibido.
-6. **Tope máximo por producto** y **producto inexistente**.
+**Verificación con el error real:** durante la prueba en navegador, la pantalla del historial mostró el mensaje de `MISSING_INDEX` mientras el índice se construía, y funcionó al terminar. El comportamiento se reprodujo tal cual lo describía la respuesta.
 
-**Qué acepté y por qué**
+---
 
-- **Todos los casos**, porque cada uno describe un fallo que el usuario notaría.
-- Sobre todo, la propuesta de que **un único helper recalcule los totales** al final de cada acción. Eso convierte "acordarse de hacerlo bien cuatro veces" en "que no haya forma de hacerlo mal": ninguna acción arma el estado a mano.
-- El caso de punto flotante, que sale directo de la regla del `CLAUDE.md` sobre montos monetarios.
+## Checklist de validación humana
 
-**Qué rechacé y por qué**
+El enunciado pide confirmar tres cosas antes de aceptar una respuesta de IA.
 
-- Un test de "acción desconocida devuelve el mismo estado". Con la unión discriminada completa, TypeScript ya garantiza que no existen otros valores de `type`, y escribirlo habría requerido un `as unknown as CartAction` — desactivar el chequeo para probar algo que el chequeo ya cubre.
+**¿Está alineado con la documentación oficial?**
 
-**Evidencia**
+Sí, y en dos puntos se consultó la documentación **antes** de escribir el código, no después:
 
-Se verificó que los tests **detectan errores reales**, rompiendo el reducer a propósito:
+- **`FirestoreDataConverter`**: se confirmó en el código del SDK (`firebase-js-sdk`, `user_data_writer.ts`) que el SDK modular **siempre** devuelve `Timestamp` y que la vieja opción `timestampsInSnapshots` fue eliminada. Eso convirtió el converter de "sugerencia del enunciado" en requisito real.
+- **`SnapshotOptions.serverTimestamps`**: la documentación dice que el valor por defecto (`'none'`) devuelve **`null`** para un `serverTimestamp()` pendiente. Sin ese dato, el converter habría fallado al leer una orden recién creada.
 
-| Qué se rompió | Qué reportaron los tests |
+**¿Compila con los tipos y encaja con la arquitectura?**
+
+Sí. `tsc` y `eslint` en cero, sin un solo `any`. La separación **UI → Context → Service → Firestore** se respeta: ninguna página importa el SDK de Firestore.
+
+Dos ajustes concretos que impuso el `tsconfig` heredado y que ninguna respuesta anticipó:
+
+- `exactOptionalPropertyTypes` obliga a **omitir** `updatedAt` cuando no existe, en vez de asignarle `undefined`. De ahí el spread condicional del converter.
+- `erasableSyntaxOnly` prohíbe los *parameter properties* (`constructor(readonly x: number)`), que hubo que reescribir en un mock.
+
+**¿Se probó de verdad?**
+
+Sí, en tres niveles:
+
+| Nivel | Qué cubre |
 |---|---|
-| Se quitó el redondeo a centavos | `expected 0.30000000000000004 to be 0.3` |
-| Se forzó que siempre agregue una fila nueva | `expected [...] to have a length of 1 but got 2` |
-
-Un test que pasa siempre no aporta información. Estos fallan cuando la lógica se rompe. Salida completa en [`docs/test-output.txt`](test-output.txt).
+| 519 tests automatizados | Lógica pura, service con Firebase mockeado, y las pantallas |
+| 23 pruebas de reglas | Contra Firestore **real**, con el SDK cliente |
+| Verificación en navegador | Flujo completo customer y admin con Chrome DevTools |
 
 ---
 
-## Intervención 2 — Tests del flow con mocks (Opción A y Opción B)
+## Dónde la IA se equivocó
 
-**Prompt**
+Esta sección existe porque una auditoría que solo registra aciertos no es una auditoría. Todos estos errores los cometió la IA durante el desarrollo y se detectaron verificando.
 
-> Sabiendo que B es viable sin AWS pero exige construir también el CRUD de admin, ¿qué alcance elegís?
->
-> → **A + B: todos los criterios PLUS**
+**1. Diagnóstico inválido buscando en el lugar equivocado.**
 
-**Resumen de la respuesta**
+Al investigar por qué el logout parecía no funcionar, se buscó la sesión en `localStorage` y no se encontró nada, y se concluyó que el logout había funcionado. La conclusión era inválida: **Firebase Auth persiste en IndexedDB** (`firebaseLocalStorageDb`), no en `localStorage`. Buscar en el lugar equivocado y no encontrar nada no prueba nada. El problema real era otro: el clic del automatizador no llegaba a React.
 
-Para el checkout (Opción A): mockear la **capa de servicios** con `vi.mock`, cubriendo éxito, error y doble envío. Para el alta de producto (Opción B): **MSW** interceptando las dos requests (`POST /api/uploads/presign` y `PUT` a S3), verificando además el orden en que salen.
+**2. Búsqueda de secretos con un falso positivo, y después con un falso negativo.**
 
-**Qué acepté y por qué**
+Un `grep` de `BEGIN PRIVATE KEY` sobre los archivos rastreados dio dos coincidencias que resultaron ser **documentación sobre la búsqueda de secretos**, no secretos. Al corregirlo, el segundo intento capturó un fragmento vacío y `grep -F ""` coincidió con los 121 archivos.
 
-- **Mockear el service y no el SDK de Firebase** en el checkout. Imitar `addDoc`, `collection` y `serverTimestamp` habría hecho que el test probara que sabemos usar Firebase, en vez de que la página reacciona bien según la operación salga bien o mal.
-- **MSW para las llamadas HTTP.** Intercepta a nivel de red, así que el código llama a `fetch` de verdad con su URL, su método y su cuerpo reales. Un `vi.fn()` que devuelve un objeto no detectaría un cambio de endpoint.
-- **`onUnhandledRequest: "error"`**: cualquier request sin handler rompe el test en lugar de salir a la red.
-- **Subir la imagen ANTES de crear el producto.** Al revés, si la subida falla queda un producto en el catálogo apuntando a una imagen inexistente, visible para todos los clientes y sin forma automática de detectarlo. En este orden, lo peor que puede pasar es una imagen huérfana en el bucket: invisible y barata de limpiar.
+Lo que resolvió las dos cosas fue la **contraprueba**: confirmar que el método encuentra el fragmento donde sí debe estar. Sin eso, un "0 coincidencias" no distingue entre *"no hay secretos"* y *"mi búsqueda está rota"*.
 
-**Qué rechacé y por qué**
+**3. Un "lint OK" que no dependía del resultado del lint.**
 
-- **La primera versión del test de doble envío.** Usaba `user.dblClick()` y **pasaba igual con la protección quitada**: `userEvent` espera a que React re-renderice entre un click y el siguiente, así que el segundo encuentra el botón ya deshabilitado. El test verificaba el atributo `disabled`, no la protección real. Se reescribió disparando los dos clicks dentro de un mismo `act()`, sin re-render en el medio.
-- **Poner `AuthProvider` y `ProductsProvider` dentro de `renderWithProviders`**, como sugiere la plantilla del enunciado. En este repositorio, importar `ProductsProvider` arrastra `lib/env.ts`, que valida las variables de entorno **en el momento de importarse**: bastaría con importar el wrapper para que el CI reventara antes de correr un solo test. La decisión quedó documentada dentro del propio archivo.
-- **Espiar `dispatch` como aserción principal**, que el enunciado marca explícitamente como anti-patrón. Todas las aserciones miran resultados observables (`items`, `totalItems`, `totalPrice`), así que sobreviven a un refactor del provider.
+Se reportó el lint en verde cuando en realidad tenía un error. El comando terminaba en `&& echo "lint OK"` después de un `tail`, que siempre tiene éxito, así que el mensaje se imprimía pasara lo que pasara. Un chequeo cuyo resultado no depende de lo que chequea es peor que no tenerlo, porque da confianza falsa.
 
-**Evidencia**
+**4. Una predicción equivocada sobre cuándo volvería a compilar el proyecto.**
 
-El test de doble envío, verificado en las dos direcciones:
+Se anunció que el proyecto compilaría al terminar la Etapa 2. No fue así: faltaba actualizar el checkout, que era la Etapa 3.
 
-| Estado del código | Resultado |
+**5. Impaciencia interpretada como bug.**
+
+El historial fallaba con `MISSING_INDEX` y se reintentó varias veces sospechando un problema de código. No lo había: el índice simplemente estaba tardando ~2 minutos en construirse, exactamente como decía la documentación. Se confirmó reproduciendo la consulta desde Node, que funcionó apenas el índice estuvo listo.
+
+---
+
+## Auditoría final: `/code-review` sobre la rama completa
+
+Antes de abrir el Pull Request se pasó una revisión automatizada sobre los nueve commits. Encontró **cinco problemas, y los cinco eran reales**. Se corrigieron todos.
+
+Vale registrar la predicción fallida: antes de correrla se anticipó que el revisor marcaría cosas correctas —decisiones deliberadas y documentadas— que habría que filtrar. No pasó. Todo lo que marcó había que arreglarlo.
+
+### 1. Un documento corrupto rompía el listado entero *(el más grave)*
+
+Estaba documentado en el README como "limitación conocida", tratándolo como un **accidente**. La revisión mostró que es **explotable a propósito**: como las reglas no pueden validar los elementos de un array, cualquier usuario autenticado puede escribir `items: [1, 2, 3]` desde la consola del navegador. Con la validación estricta en los listados, ese único documento dejaba inutilizables su historial **y el panel de administración** — de forma permanente, porque las reglas tampoco permiten borrar órdenes.
+
+No es una limitación: es una **denegación de servicio** que se provoca en dos líneas.
+
+**Corrección:** los listados usan `parseOrderSnapshot()`, que valida con `safeParse` y omite los documentos inválidos registrándolos en la consola. La lectura de *una* orden puntual sigue siendo estricta: ahí un null se leería como "no existe" y ocultaría el problema.
+
+**Verificación:** se agregó un caso a `verify:rules` que **espera "permitido"** al escribir esos ítems inválidos, confirmando el límite contra Firestore real, más un test unitario de que el listado omite el documento roto y devuelve los sanos.
+
+### 2. Un `ZodError` crudo escapaba del checkout
+
+`orderWriteSchema.parse` estaba fuera del `try`, así que un carrito manipulado (por ejemplo, con una cantidad mayor al máximo) producía un error técnico en inglés en lugar del `OrderError` documentado. Meterlo dentro del `try` tampoco alcanzaba: `mapOrderError` no reconoce los errores de Zod y lo habría convertido en `UNKNOWN_ERROR` con un *"intentá de nuevo en unos minutos"* marcado como reintentable — engañoso, porque el mismo carrito falla siempre igual.
+
+**Corrección:** `safeParse` con un `OrderError` propio, no reintentable, que le dice al usuario qué hacer (vaciar el carrito). Y se atacó la causa raíz: `cartItemSchema` no tenía tope de cantidad aunque el reducer sí lo aplicaba, así que ahora un carrito manipulado se rechaza **al leerlo de `localStorage`**, en la puerta de entrada, y no tres pantallas después.
+
+### 3. El diálogo de confirmación era inalcanzable con teclado
+
+El panel se renderiza **arriba** de la tabla, pero se dispara desde un `<select>` que está **dentro** de ella. Sin mover el foco, quien navega con Tab nunca llegaba a los botones: quedaron detrás en el orden del documento.
+
+**Corrección:** el foco entra al botón de confirmar al abrir y vuelve al `<select>` al cerrar, Escape cancela, y el diálogo se anuncia con `aria-labelledby` apuntando al texto del cambio. **No** se declaró `aria-modal`: no hay trampa de foco, y declararlo sería mentirle a la tecnología de asistencia.
+
+### 4. El script de verificación podía reportar éxito sin verificar nada
+
+`comprobar()` daba por buena **cualquier** excepción como "rechazado por las reglas". Con ese criterio, una prueba que espera un rechazo pasaba también ante un corte de red, un índice faltante o un error de tipeo en el propio script — y el informe decía "23 de 23" sin haber comprobado una sola regla.
+
+Es exactamente el error que este documento critica más arriba al hablar de la contraprueba, cometido en el archivo siguiente. **Un chequeo cuyo resultado no depende de lo que chequea da confianza falsa, que es peor que no tener chequeo.**
+
+**Corrección:** solo cuenta como rechazo un `FirebaseError` con código `permission-denied`. Cualquier otra cosa se marca como fallo inesperado, se imprime con su causa y hace fallar el script.
+
+### 5. El script contaminaba la base en cada corrida
+
+Creaba órdenes de prueba que **las reglas vuelven imposibles de borrar desde el cliente**, así que quedaban para siempre en el historial real y en el panel. Se había mencionado el problema ("borralas desde la consola") sin notar que desde el cliente no se podían borrar.
+
+**Corrección:** limpieza con el SDK de Admin dentro de un `finally`, para que ocurra aunque una prueba falle. Es la única parte del script que se saltea las reglas, y es deliberado: ahí no se verifica nada, se limpia.
+
+---
+
+## Auditoría de seguridad: `/security-review`
+
+Después del code review se pasó una revisión enfocada solo en seguridad. Encontró **un hallazgo, de severidad alta**, y era el más importante de todo el proyecto.
+
+### El agujero: el precio dejó de verificarse en ningún lado
+
+El diagnóstico fue exacto y demoledor:
+
+> *"Esta rama eliminó la única verificación de precio del lado del servidor que el proyecto tenía. […] `createOrderFromCart` recalcula el total en el cliente, pero tanto el carrito como sus precios salen de `localStorage`, y de todas formas el SDK se puede invocar desde la consola. El recálculo en el cliente no es un control. La rama documenta el trade-off, pero **documentar un agujero no lo cierra**."*
+
+El exploit, ejecutable por cualquier cliente autenticado desde la consola del navegador:
+
+```js
+setDoc(doc(collection(db, 'orders')), {
+  userId: <su propio uid>,
+  items: [{ productId: 'nike-air-max', name: 'Nike Air Max 90', priceAtPurchase: 0.01, quantity: 10 }],
+  total: 0.1, status: 'pending', createdAt: serverTimestamp(),
+})
+```
+
+Pasaba **todas** las condiciones de la regla, superaba la validación al leerse, y se mostraba como una orden legítima de \$0,10 que un administrador procesaría sin notar nada.
+
+**Es exactamente el ataque que la regla eliminada existía para bloquear**, como decía su propio comentario en el L7: *"era exactamente lo que permitía comprar a cualquier precio editando el localStorage"*.
+
+### Por qué las dos soluciones propuestas no servían
+
+El revisor propuso mover la escritura a un camino de servidor (Cloud Function) o mantener una subcolección espejo. **El enunciado excluye explícitamente ambas**: *"No Cloud Functions"* y *"No recalcular totales server-side"*. La subcolección espejo además no funcionaba: las reglas no pueden verificar que el `items[]` embebido coincida con ella, y el array embebido es el que se muestra.
+
+### La solución: verificación desenrollada por índice
+
+Consultando la documentación oficial apareció la pieza que faltaba:
+
+> *"Security rules do not support generics for list types. You can verify that a field is a list, but you cannot enforce that all members share the same data type. **You must validate specific entries individually using bracket notation.**"*
+
+Las reglas no pueden **recorrer** un array, pero sí **acceder a una posición**. De ahí el desenrollado de `itemValido(items, 0)` a `itemValido(items, 9)`, cada uno comparando `items[i].priceAtPurchase` contra `precioDeCatalogo(items[i].productId)`. El `total` se verifica contra la suma de las líneas.
+
+**Cierra el exploit sin violar ninguna exclusión del enunciado**: no es una Cloud Function, no recalcula totales en el servidor (los *verifica*), y el modelo `items[]` embebido queda intacto.
+
+### El límite duro que apareció al investigar
+
+Antes de escribir la regla se verificó en la documentación un dato que resultó decisivo: **Firestore permite un máximo de 10 llamadas a `get()` por request de un solo documento**, y excederlo devuelve `permission-denied`.
+
+Como cada ítem consume una, el tope de productos por orden **no es una decisión de diseño: es el techo de la plataforma**. `MAX_ITEMS_PER_ORDER` bajó de 50 a 10, y queda señalado en mayúsculas en las reglas que agregar cualquier `get()` a esa regla —incluido un `isAdmin()`— la rompería.
+
+Haberlo consultado *antes* de escribir evitó desplegar una regla que habría rechazado órdenes legítimas de forma intermitente, según cuántos productos distintos tuviera el carrito.
+
+### Verificación
+
+| Caso nuevo | Resultado |
 |---|---|
-| Sin el cerrojo del `useRef` | `expected to be called 1 times, but got 2 times` |
-| Con el cerrojo | Pasa |
+| Precio inventado más barato | rechazado ✅ |
+| Total que no coincide con las líneas | rechazado ✅ |
+| Producto inexistente | rechazado ✅ |
+| Más de 10 ítems | rechazado ✅ |
+| `items: [1,2,3]` *(antes permitido)* | rechazado ✅ |
 
-Y el de MSW afirmando el orden de las requests:
+Y —lo más importante— se comprobó en el navegador que **una compra legítima sigue funcionando**: tres productos distintos con cantidades 3, 2 y 1, total \$387.680, confirmada y persistida correctamente. Endurecer las reglas sin verificar el camino feliz habría cambiado un agujero de seguridad por un producto roto.
 
-```ts
-expect(requestLog).toEqual([
-  "POST /api/uploads/presign",
-  "PUT /products/fake-uuid.png",
-]);
-```
+### Lo que el revisor examinó y encontró correcto
 
----
+Las reglas de lectura y actualización, la paridad de la máquina de estados entre código y reglas, el `console.error` de `parseOrderSnapshot` (registra solo ids y rutas de Zod, sobre documentos que la sesión ya podía leer), la ausencia de XSS e inyección, el uso del SDK de Admin acotado a la limpieza del script, y el manejo de secretos.
 
-## Intervención 3 — Checklist de deploy para Vercel + Vite + Functions
+### Una predicción propia que falló, otra vez
 
-**Prompt**
+Antes de correr la revisión se anticipó que marcaría el `.env` con contraseñas de prueba, el `console.error`, y algo del flujo heredado de S3. **No marcó nada de eso.** Encontró un solo problema, más grave que todos los que se habían previsto, y en el único lugar donde se creía haber tomado una decisión informada.
 
-> Continuemos con la Etapa B.
->
-> (Y a lo largo del deploy: el diagnóstico de los errores de producción y el armado del checklist.)
-
-**Resumen de la respuesta**
-
-Separó el deploy en dos etapas verificables (primero la app con las variables públicas, después S3), propuso el grep de secretos sobre `dist/`, y armó [`production-checklist.md`](../production-checklist.md) ejecutando cada ítem en vez de marcarlo.
-
-**Qué acepté y por qué**
-
-- **Dividir el deploy en dos etapas.** Si algo falla en la primera, el problema está en la configuración base de Vercel; si falla en la segunda, en AWS. Mezclarlas convierte cualquier error en una búsqueda entre diez variables posibles.
-- **Nombrar las variables `S3_*` y no `AWS_*`.** Las Vercel Functions corren sobre AWS Lambda, donde `AWS_ACCESS_KEY_ID` y `AWS_SECRET_ACCESS_KEY` están reservadas por el runtime y serían pisadas.
-- **El grep de secretos sobre `dist/` con contraprueba**: buscar también un valor que **sí** debe estar (el id del proyecto de Firebase) y encontrarlo. Sin eso, un "no encontré nada" no distingue entre "no hay secretos" y "el método no busca bien".
-- **Sacar `@vercel/node`.** Lo habíamos instalado solo para dos definiciones de tipos, y traía 105 paquetes con **7 vulnerabilidades altas**. La firma estándar de la Web (`Request` a `Response`) no necesita esos tipos.
-
-**Qué rechacé y por qué**
-
-- **`npm audit fix --force`.** Proponía bajar `@vercel/node` de la versión 5 a la 3 y `firebase-admin` de la 14 a la 10. Eso no es arreglar: es retroceder años de versiones para tapar un aviso. La línea "which is a breaking change" en la salida de `npm audit` es una señal de alarma, no una recomendación.
-- **Cargar el `FIREBASE_SERVICE_ACCOUNT_JSON` en Vercel.** Tras rediseñar la función para verificar el token con `jose`, dejó de hacer falta. Una credencial con acceso total al proyecto que deja de vivir en un servidor es una superficie de ataque menos.
-- **Relajar temporalmente las reglas de Firestore** para poder correr el seed. Habría abierto una ventana en la que cualquiera podía escribir en el catálogo, y dejaba el repositorio y el proyecto desincronizados si el paso de restaurar fallaba. En su lugar se migró el seed al SDK de Admin.
-
-**Evidencia**
-
-```
-=== ¿hay secretos en dist/? ===
-  AKIA              -> 0 archivo(s)
-  S3_SECRET         -> 0 archivo(s)
-  SECRET_ACCESS_KEY -> 0 archivo(s)
-  BEGIN PRIVATE KEY -> 0 archivo(s)
-  service_account   -> 0 archivo(s)
-  private_key       -> 0 archivo(s)
-```
-
-Y el flujo de subida verificado de punta a punta en producción, leído de la pestaña Network:
-
-```
-POST /api/uploads/presign        200
-PUT  .../products/<uuid>.png     200   (a S3, con URL firmada)
-POST .../Firestore/Write         200   (producto creado)
-GET  .../products/<uuid>.png     200   (imagen pública)
-```
+Es la segunda vez en este proyecto que la predicción sobre qué encontraría una revisión resulta equivocada. La conclusión práctica: anticipar los hallazgos sirve para prepararse, nunca para filtrarlos.
 
 ---
 
-## Intervención 4 — Recorrer todos los flujos y corregir lo que aparezca
+## Tercera auditoría: recorrer la app de punta a punta
 
-**Prompt**
+Con el código ya congelado y las dos revisiones anteriores cerradas, se recorrió la aplicación entera en el navegador. Encontró **cuatro cosas**, y una de ellas es la más instructiva del proyecto: **la causó el arreglo de la auditoría anterior**.
 
-> ¿Puedes probar todos los flujos que tenga la app?
->
-> (Y después: "Vamos a corregir ahora todos los hallazgos.")
+### El hallazgo que se causó solo
 
-**Resumen de la respuesta**
+El commit de seguridad restauró la verificación del precio contra el catálogo. Eso volvió a hacer posible un rechazo que había dejado de existir: **el precio de un producto cambia mientras está en el carrito de alguien**.
 
-Manejó la aplicación entera —catálogo, carrito, auth, checkout, panel de admin, guards y 404— en producción, con al menos un intento de romper cada flujo. Encontró cinco defectos, y un sexto **al verificar la corrección de uno de los cinco**. El detalle completo está en la sección "Verificación de todos los flujos" de [`production-checklist.md`](../production-checklist.md).
+El mensaje de error decía *"volvé a iniciar sesión"*. Se había escrito en una etapa intermedia, cuando la verificación no existía y la única causa plausible era la sesión. Al restaurar la regla se actualizaron el README, la guía de arquitectura, estas notas y el modelo de dominio — **pero no los mensajes ni los comentarios**.
 
-Antes de escribir en producción preguntó hasta dónde avanzar, y resolvió la parte de credenciales sin pedirme ninguna: creó una cuenta con el propio formulario de registro y la usó para login, logout y checkout. Para el panel de admin solo hizo falta que yo cambiara el rol en la consola de Firebase.
+El resultado era un callejón sin salida: la persona cerraba sesión, volvía a entrar, reintentaba y fallaba igual, para siempre.
 
-**Qué acepté y por qué**
+La sonda que lo destapó fue cambiar el precio de un producto por detrás con el SDK de Admin y comprar con un carrito desactualizado. Y la verificación del arreglo fue la parte que importa: se restauró el precio y se apretó **el mismo botón sin tocar nada más**, y la compra salió. Eso prueba que el consejo nuevo (*"volvé al carrito, revisalo"*) destraba el problema de verdad, cosa que el anterior no podía hacer.
 
-- **Probar las dos direcciones de cada defensa, no solo el ataque.** Verificar que un precio manipulado se rechaza es la mitad del trabajo; la otra mitad es que la compra legítima siga funcionando. Una regla que bloquea al atacante *y también* al cliente no es una corrección, es una caída de servicio.
-- **`details.kind` en vez de un código de error por motivo.** El `code` es lo que el frontend usa para decidir qué hacer, y ante los siete rechazos hace exactamente lo mismo. Multiplicar códigos obliga al cliente a conocer una lista que crece con cada validación nueva.
-- **`multipleOf(0.01)` en lugar de contar decimales a mano.** En punto flotante `0.1 + 0.2` no da `0.3`; un chequeo casero rechaza precios válidos en casos sueltos e impredecibles. Lo comprobó **antes** de escribir la corrección, no después.
-- **El hook `useDocumentTitle` en vez de una tabla de rutas en el layout.** La tabla funciona, pero crea un segundo lugar que hay que acordarse de actualizar al sumar una ruta — y el día que alguien se olvide, la pantalla nueva hereda el título de otra: el mismo bug de hoy con otra causa.
-- **Registrar en el checklist los escenarios que fallaron a propósito**, no solo los que pasaron. Un tilde sin el escenario al lado es una afirmación sin evidencia.
+Un segundo comentario, en `orderConverter.ts`, tenía **tres afirmaciones falsas** por la misma causa: que las reglas no podían validar los ítems, que un documento con `items: [1,2,3]` era aceptado, y que el tope era de 50 en lugar de 10. El código estaba bien; la explicación mentía.
 
-**Qué se descartó en el camino**
+**La lección práctica:** documentar a fondo el *porqué* de cada decisión tiene un costo que no se ve hasta que una decisión se revierte — **hay más lugares que quedan mintiendo**, y a un comentario detallado se le cree más que a uno vago. Revertir una decisión de fondo exige un `grep` de los términos de la decisión vieja antes de darla por cerrada.
 
-- **La primera corrección del panel de admin**, que centraba la tarjeta del formulario. Funcionaba y la medición lo confirmaba (310 px de margen a cada lado), pero dejaba el `<h1>` en un eje distinto. Se reemplazó por acotar la columna entera. La descartó la captura de pantalla, no un número.
-- **Medir el reacomodo de las acciones del checkout redimensionando la ventana.** La ventana del navegador no baja de 500 px, y a ese ancho las dos acciones seguían entrando: la medición habría dado "correcto" sin haber ejercitado nada. Se reprodujo la condición apretando el contenedor a 260 px.
-- **Verificar la Vercel Function con `vite dev`.** No existe ahí. Se subió la rama para que Vercel construyera un Preview y se atacó el endpoint realmente desplegado.
+### Los otros tres
 
-**Evidencia**
+**El checkout se colgaba para siempre sin conexión.** `setDoc()` **no rechaza** offline: Firestore encola la escritura localmente y deja la promesa pendiente. Se comprobó con 45 segundos sin red — botón congelado en *"Confirmando compra..."*, sin error, sin salida.
 
-El caso que resume la ronda — el mismo campo, dos problemas opuestos, antes y después:
+Eso invalidó un supuesto del propio código: `NETWORK_ERROR` con `retryable: true` se había diseñado para este caso y **nunca se dispara en un corte de red real**.
 
-```
-size: 6 MB  ->  kind: SIZE          "no puede pesar más de 5 MB"     (correcto)
-size: 0     ->  kind: SIZE          "no puede pesar más de 5 MB"     (al revés)
-size: 0     ->  kind: INVALID_SIZE  "está vacío o dañado"            (corregido)
-```
+La corrección no cancela la escritura, porque va a completarse sola: a los 8 segundos aparece un aviso —`role="status"`, no `alert`, porque la compra sigue en curso— que advierte **no cerrar la pestaña**. Esa advertencia salió de investigar antes de escribirla: el proyecto usa la caché **en memoria** de Firestore, así que la escritura encolada se pierde al recargar. Prometer que "se registra igual" habría sido mentir.
 
-Y la corrección del `<title>`, recorriendo las rutas sin recargar:
+**Dos encabezados `h2` hermanos** en el panel de administración, diciendo casi lo mismo. Regresión introducida al agregar la ruta-layout.
 
-```
-/                  Catálogo | E-commerce Henry
-/cart              Carrito | E-commerce Henry
-/checkout          Checkout | E-commerce Henry
-/admin             Panel de administración | E-commerce Henry
-/login             Iniciar sesión | E-commerce Henry
-/signup            Crear cuenta | E-commerce Henry
-(ruta inexistente) Página no encontrada | E-commerce Henry
-```
+**El botón "−" del carrito eliminaba el producto** al pulsarlo con una sola unidad, sin aviso — mientras que vaciar el carrito sí pedía confirmación. Dos acciones destructivas con criterios opuestos. Ahora se deshabilita en 1, igual que el "+" en el tope; eliminar sigue disponible en el botón que dice lo que hace.
+
+### Un falso positivo que enseña
+
+`documentElement.scrollWidth` daba 751 en un viewport de 320, aparentando scroll horizontal. Intentar scrollear de verdad dejó `scrollX` en **0**: el contenedor de la tabla contenía el desborde correctamente. La métrica mentía; la prueba directa, no.
+
+Es la misma lección que la contraprueba de los secretos, en otro disfraz: **medir algo cercano al problema no es medir el problema**.
+
+### Por qué esta ronda encontró lo que los 531 tests de entonces no
+
+Los cuatro hallazgos comparten una característica: **ninguno era observable desde un test**.
+
+Los tests mockean el service, así que un `setDoc` que nunca resuelve no era un escenario que se hubiera imaginado. La jerarquía de encabezados no la mira ningún test. El botón "−" tenía un test que afirmaba el comportamiento viejo — pasaba en verde **codificando el problema**. Y el mensaje obsoleto era correcto en su propio test unitario: lo que estaba mal era su relación con una regla que vive en otro archivo y se despliega aparte.
+
+**Los tests verifican lo que a uno se le ocurrió verificar. El navegador muestra lo que no.**
 
 ---
 
-## Lo que más aportó la IA en este homework
+## Decisiones tomadas sin consultar a la IA
 
-No fue escribir código: fue **insistir en verificar**.
+Para dejar clara la frontera de lo que se delegó:
 
-Tres de los cuatro problemas registrados en las notas de debugging del checklist eran invisibles desde los tests, y los tres aparecieron por probar contra el despliegue real:
-
-- Los 390 tests pasaban con la Vercel Function **completamente rota**, porque MSW intercepta la request y el código de la función nunca se ejecuta.
-- El CI estaba en verde con producción sirviendo código viejo.
-- El error que veía el usuario (`500 FUNCTION_INVOCATION_FAILED`) no decía nada: la causa real solo estaba en los logs de Vercel.
-
-La conclusión que me llevo: **una suite en verde prueba lo que la suite mira.** Saber qué queda fuera de esa mirada es tan importante como la cobertura.
-
-La ronda de la Intervención 4 le agregó un matiz que no esperaba. Los seis defectos que aparecieron ahí no estaban fuera del alcance de los tests por ser difíciles: estaban fuera porque **ningún test se le ocurriría preguntar eso**. Que el título de la pestaña sea distinto en cada pantalla, que un archivo vacío reciba el consejo correcto, que el título y la tarjeta compartan un eje. Son cosas que se notan usando la aplicación, no ejecutándola.
-
-Y dos de los seis aparecieron **verificando la corrección de otro**. Eso reordena algo: la verificación no es el trámite del final, es donde sigue apareciendo trabajo. Cerrar un hallazgo sin volver a mirar la pantalla es cerrarlo a medias.
+- **Usar un proyecto de Firebase nuevo** en lugar de reutilizar el del L7, para no romper su despliegue en producción al cambiar las reglas de `orders`.
+- **Una sola rama** con un commit por etapa y un único PR, en vez de una rama por etapa: varias etapas no compilan solas, así que habría PRs con el CI en rojo.
+- **Adelantar la reescritura de los tests del service**, planificada para el final. Con el archivo roto el build fallaba, y mientras hay errores conocidos no se puede distinguir un error nuevo de los que ya estaban.
+- **Confirmar todos los cambios de estado en el panel de administración**, no solo las cancelaciones: en esta máquina de estados ninguna transición se puede deshacer.

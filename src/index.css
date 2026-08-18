@@ -16,6 +16,20 @@
   --shadow-card: 0 8px 24px rgba(43, 43, 51, 0.08);
   --header-bg: rgba(255, 255, 255, 0.85);
 
+  /* Estados de una orden. Todos los pares texto/fondo se verificaron contra la
+     fórmula de contraste de WCAG 2.1: el más bajo da 6.86:1, muy por encima del
+     4.5:1 que exige el nivel AA para texto normal.
+     El color acompaña pero nunca comunica solo: el badge siempre lleva el
+     nombre del estado escrito (ver OrderStatusBadge.tsx). */
+  --status-pending-bg: #fff4e0;
+  --status-pending-text: #7a4a00;
+  --status-processing-bg: #e3f0ff;
+  --status-processing-text: #10437a;
+  --status-completed-bg: #e4f5e9;
+  --status-completed-text: #145c2e;
+  --status-cancelled-bg: #fdecec;
+  --status-cancelled-text: #7a1616;
+
   font: 16px/1.5 system-ui, "Segoe UI", Roboto, sans-serif;
   color-scheme: light dark;
   color: var(--text);
@@ -41,6 +55,17 @@
     --accent-soft: rgba(192, 132, 252, 0.14);
     --shadow-card: 0 8px 24px rgba(0, 0, 0, 0.35);
     --header-bg: rgba(31, 32, 40, 0.85);
+
+    /* Mismos estados, invertidos para fondo oscuro. También verificados: el par
+       más bajo da 8.25:1. */
+    --status-pending-bg: #3a2f1a;
+    --status-pending-text: #f5cf8a;
+    --status-processing-bg: #1c2f45;
+    --status-processing-text: #a8cdf5;
+    --status-completed-bg: #1c3a28;
+    --status-completed-text: #a3e0bb;
+    --status-cancelled-bg: #3a1f1f;
+    --status-cancelled-text: #f3b4b4;
   }
 }
 
@@ -1162,4 +1187,436 @@ h1 {
   min-height: 44px;
   color: var(--accent);
   font-weight: 600;
+}
+
+/* ==========================================================================
+   ÓRDENES — badge de estado, historial del customer y detalle
+   ========================================================================== */
+
+/* Etiqueta del estado. El color de fondo cambia según el estado, pero el texto
+   siempre está: quien no distinga los colores lee igual "Cancelada". */
+.order-status {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 600;
+  /* Sin esto, un badge dentro de un enlace hereda el subrayado del enlace y
+     parece clickeable por su cuenta. */
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.order-status--pending {
+  background: var(--status-pending-bg);
+  color: var(--status-pending-text);
+}
+
+.order-status--processing {
+  background: var(--status-processing-bg);
+  color: var(--status-processing-text);
+}
+
+.order-status--completed {
+  background: var(--status-completed-bg);
+  color: var(--status-completed-text);
+}
+
+.order-status--cancelled {
+  background: var(--status-cancelled-bg);
+  color: var(--status-cancelled-text);
+}
+
+/* --------------------------------------------------------------------------
+   Historial del customer
+   -------------------------------------------------------------------------- */
+
+.orders-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* La tarjeta entera es el enlace: el área clickeable es toda la fila, no un
+   "ver más" chiquito al final. Es más fácil de acertar con el dedo y cumple de
+   sobra el mínimo de 44px de área táctil. */
+.orders-list__link {
+  display: grid;
+  /* Móvil primero: una sola columna, cada dato en su renglón. */
+  grid-template-columns: 1fr;
+  gap: 8px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: inherit;
+  text-decoration: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.orders-list__link:hover {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-card);
+}
+
+.orders-list__id {
+  font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
+  font-size: 14px;
+  color: var(--text-muted);
+  /* El id es largo y no tiene espacios: sin esto desborda la tarjeta en móvil. */
+  overflow-wrap: anywhere;
+}
+
+.orders-list__date,
+.orders-list__units {
+  font-size: 14px;
+  color: var(--text-muted);
+}
+
+.orders-list__total {
+  font-size: 18px;
+  color: var(--text-h);
+}
+
+/* A partir de tablet, la fila se acomoda en columnas. El badge y el total
+   quedan alineados entre tarjetas, que es lo que permite comparar de un vistazo. */
+@media (min-width: 768px) {
+  .orders-list__link {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    align-items: center;
+    column-gap: 20px;
+  }
+
+  .orders-list__id {
+    grid-column: 1;
+  }
+
+  .orders-list__date {
+    grid-column: 1;
+  }
+
+  .orders-list__units {
+    grid-column: 2;
+    text-align: right;
+  }
+
+  .orders-list__total {
+    grid-column: 3;
+    text-align: right;
+    min-width: 120px;
+  }
+
+  .order-status {
+    grid-column: 2 / 4;
+    justify-self: end;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Detalle de la orden
+   -------------------------------------------------------------------------- */
+
+.order-detail__id {
+  font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
+  font-size: 14px;
+  color: var(--text-muted);
+  margin: 0 0 20px;
+  overflow-wrap: anywhere;
+}
+
+.order-detail__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px 32px;
+  margin: 0 0 24px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.order-detail__field dt {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+
+.order-detail__field dd {
+  margin: 0;
+  font-weight: 600;
+}
+
+.order-detail__items {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 24px;
+}
+
+.order-detail__items th,
+.order-detail__items td {
+  padding: 12px 8px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+
+.order-detail__items thead th {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+/* Las tres columnas numéricas van a la derecha: alineados por la unidad, los
+   importes se comparan de un vistazo. */
+.order-detail__items th:not(:first-child),
+.order-detail__items td:not(:first-child) {
+  text-align: right;
+}
+
+.order-detail__items tfoot th,
+.order-detail__items tfoot td {
+  border-bottom: none;
+  padding-top: 16px;
+  font-size: 18px;
+  color: var(--text-h);
+}
+
+.order-detail__back-link,
+.checkout__detail-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* Si el sistema pide menos movimiento, se apagan las transiciones. No es una
+   preferencia estética: para algunas personas el movimiento en pantalla provoca
+   mareo o malestar real. */
+@media (prefers-reduced-motion: reduce) {
+  .orders-list__link {
+    transition: none;
+  }
+}
+
+/* ==========================================================================
+   PANEL DE ADMINISTRACIÓN — layout con secciones y listado de órdenes
+   ========================================================================== */
+
+.admin-layout__nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 24px;
+  border-bottom: 1px solid var(--border);
+}
+
+.admin-layout__link {
+  /* min-height de 44px: área táctil mínima. Son los enlaces principales del
+     panel y tienen que poder acertarse con el dedo. */
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 16px;
+  color: var(--text-muted);
+  font-weight: 600;
+  text-decoration: none;
+  /* El borde transparente reserva el espacio del subrayado activo: sin él, la
+     pestaña seleccionada empujaría a las demás 3px hacia arriba. */
+  border-bottom: 3px solid transparent;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.admin-layout__link:hover {
+  color: var(--text);
+}
+
+/* NavLink marca el enlace activo con aria-current="page". Estilarlo desde ese
+   atributo —y no desde una clase— garantiza que lo que se VE y lo que ANUNCIA
+   un lector de pantalla no puedan desincronizarse: son el mismo dato. */
+.admin-layout__link[aria-current="page"] {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.admin-orders__filter {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 20px;
+  max-width: 280px;
+}
+
+.admin-orders__filter label {
+  font-size: 14px;
+  color: var(--text-muted);
+}
+
+.admin-orders__filter select,
+.admin-orders__table select {
+  min-height: 44px;
+  padding: 8px 12px;
+  font-size: 16px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+}
+
+/* Las <option> no heredan el fondo del <select>: sin esto quedan con el fondo
+   nativo del navegador (casi siempre claro) y texto claro en modo oscuro.
+   Mismo problema ya resuelto en el filtro del catálogo. */
+.admin-orders__filter select option,
+.admin-orders__table select option {
+  background-color: var(--surface);
+  color: var(--text);
+}
+
+/* Confirmación del cambio de estado */
+.admin-orders__confirm {
+  margin-bottom: 20px;
+  padding: 16px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background: var(--accent-soft);
+}
+
+.admin-orders__confirm p {
+  margin: 0 0 12px;
+}
+
+.admin-orders__confirm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.admin-orders__confirm-yes,
+.admin-orders__confirm-no {
+  min-height: 44px;
+  padding: 8px 20px;
+  border-radius: 6px;
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.admin-orders__confirm-yes {
+  border: none;
+  background: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.admin-orders__confirm-no {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.admin-orders__confirm-yes:disabled,
+.admin-orders__confirm-no:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.admin-orders__error {
+  margin-bottom: 20px;
+  padding: 12px 16px;
+  border: 1px solid var(--error-border);
+  border-radius: 8px;
+  background: var(--error-bg);
+  color: var(--error-text);
+}
+
+/* La tabla se desplaza dentro de su contenedor en vez de estirar la página.
+   Sin esto, en una pantalla angosta las siete columnas provocarían scroll
+   horizontal en todo el documento, que es mucho más molesto. */
+.admin-orders__table-wrapper {
+  overflow-x: auto;
+}
+
+.admin-orders__table {
+  width: 100%;
+  border-collapse: collapse;
+  /* Ancho mínimo para que las columnas no se aplasten: si no entra, aparece el
+     scroll del contenedor. */
+  min-width: 900px;
+}
+
+.admin-orders__table th,
+.admin-orders__table td {
+  padding: 12px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+
+.admin-orders__table thead th {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+/* Los identificadores en monoespaciada: con ancho fijo por carácter, dos ids
+   distintos se comparan de un vistazo en vez de tener que leerlos letra a letra. */
+.admin-orders__id {
+  font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
+  font-size: 13px;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.admin-orders__no-actions {
+  font-size: 14px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.admin-orders__updating {
+  display: block;
+  margin-top: 6px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .admin-layout__link {
+    transition: none;
+  }
+}
+
+/* Confirmación de que el cambio de estado se aplicó. Es una región live: se
+   anuncia sola al aparecer, sin que el usuario tenga que ir a buscarla. */
+.admin-orders__success {
+  margin-bottom: 20px;
+  padding: 12px 16px;
+  border: 1px solid var(--status-completed-text);
+  border-radius: 8px;
+  background: var(--status-completed-bg);
+  color: var(--status-completed-text);
+}
+
+/* El encabezado recibe el foco tras un cambio exitoso. Sin outline-offset, el
+   anillo queda pegado a las letras y se lee como un error de maquetado. */
+.admin-orders h2:focus-visible {
+  outline-offset: 4px;
+}
+
+/* Aviso de que la compra está tardando. No es un error: la escritura sigue en
+   curso, así que usa el tono informativo del acento y no el rojo de error. */
+.checkout__slow {
+  margin-bottom: 16px;
+  padding: 12px 16px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--text);
 }

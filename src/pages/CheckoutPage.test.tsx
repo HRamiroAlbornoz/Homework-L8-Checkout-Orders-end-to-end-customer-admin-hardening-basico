@@ -20,6 +20,7 @@ import { OrderError } from "../lib/orderErrors";
 // createOrderFromCart es la única puerta hacia Firestore, y está tapada.
 vi.mock("../services/ordersService", () => ({
   createOrderFromCart: vi.fn(),
+  createOrderId: vi.fn(),
 }));
 
 vi.mock("../contexts/AuthContext", () => ({
@@ -27,7 +28,7 @@ vi.mock("../contexts/AuthContext", () => ({
 }));
 
 import { useAuth } from "../contexts/AuthContext";
-import { createOrderFromCart } from "../services/ordersService";
+import { createOrderFromCart, createOrderId } from "../services/ordersService";
 import { CheckoutPage } from "./CheckoutPage";
 
 const CUSTOMER_UID = "uid-customer";
@@ -69,9 +70,21 @@ function getConfirmButton(): HTMLElement {
 beforeEach(() => {
   window.localStorage.clear();
   mockLoggedInUser();
+
+  // Ids predecibles y distintos entre sí: así los tests pueden afirmar tanto
+  // que un reintento REUSA el id como que una compra nueva pide uno nuevo.
+  // Con un valor fijo, el primer caso pasaría sin probar nada.
+  let idsGenerados = 0;
+  vi.mocked(createOrderId).mockImplementation(() => {
+    idsGenerados += 1;
+    return `orden-generada-${idsGenerados}`;
+  });
 });
 
 afterEach(() => {
+  // Si un test con temporizadores falsos falla a mitad, sin esto quedarían
+  // falsos para todos los que siguen y los fallos aparecerían lejos de la causa.
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -83,11 +96,17 @@ describe("CheckoutPage — compra exitosa", () => {
 
     await user.click(getConfirmButton());
 
-    expect(createOrderFromCart).toHaveBeenCalledWith(CUSTOMER_UID, {
-      items: cartWithTwoProducts.items,
-      totalItems: 3,
-      totalPrice: 250,
-    });
+    expect(createOrderFromCart).toHaveBeenCalledWith(
+      CUSTOMER_UID,
+      {
+        items: cartWithTwoProducts.items,
+        totalItems: 3,
+        totalPrice: 250,
+      },
+      // El tercer argumento es el id pre-generado: la página lo decide antes de
+      // escribir, no lo recibe del servidor.
+      "orden-generada-1",
+    );
   });
 
   it("muestra la confirmación con el número de orden", async () => {
@@ -241,6 +260,45 @@ describe("CheckoutPage — protección contra doble envío", () => {
   });
 });
 
+describe("CheckoutPage — idempotencia del reintento", () => {
+  it("reintentar después de un error escribe sobre el MISMO id", async () => {
+    const user = userEvent.setup();
+    vi.mocked(createOrderFromCart)
+      .mockRejectedValueOnce(new OrderError(ORDER_ERROR_CODES.NETWORK_ERROR, "Se cortó la red.", { retryable: true }))
+      .mockResolvedValueOnce("orden-generada-1");
+    renderCheckout();
+
+    await user.click(getConfirmButton());
+    await screen.findByRole("alert");
+
+    await user.click(getConfirmButton());
+    await screen.findByText(/gracias por tu compra/i);
+
+    const idsUsados = vi.mocked(createOrderFromCart).mock.calls.map((llamada) => llamada[2]);
+
+    // Este es el corazón de la idempotencia. Si la página generara un id nuevo
+    // en cada intento, acá habría dos valores distintos — y en Firestore, dos
+    // órdenes por una sola compra.
+    expect(idsUsados).toEqual(["orden-generada-1", "orden-generada-1"]);
+  });
+
+  it("el id se genera una sola vez, por más veces que se reintente", async () => {
+    const user = userEvent.setup();
+    vi.mocked(createOrderFromCart).mockRejectedValue(
+      new OrderError(ORDER_ERROR_CODES.UNKNOWN_ERROR, "Algo salió mal."),
+    );
+    renderCheckout();
+
+    await user.click(getConfirmButton());
+    await screen.findByRole("alert");
+    await user.click(getConfirmButton());
+    await user.click(getConfirmButton());
+
+    expect(createOrderId).toHaveBeenCalledTimes(1);
+    expect(createOrderFromCart).toHaveBeenCalledTimes(3);
+  });
+});
+
 describe("CheckoutPage — carrito vacío", () => {
   it("no ofrece confirmar una compra sin productos", () => {
     renderCheckout({ items: [], totalItems: 0, totalPrice: 0 });
@@ -248,5 +306,121 @@ describe("CheckoutPage — carrito vacío", () => {
     expect(screen.getByText(/tu carrito está vacío/i)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /confirmar compra/i })).not.toBeInTheDocument();
     expect(createOrderFromCart).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("CheckoutPage — la compra tarda demasiado", () => {
+  // Estos tests usan temporizadores falsos: esperar 8 segundos reales haría la
+  // suite mucho más lenta sin verificar nada más.
+  //
+  // Y usan fireEvent en vez de userEvent, igual que el test de doble envío:
+  // userEvent espera promesas que dependen del reloj, y con el reloj congelado
+  // esa espera nunca termina — el test se cuelga en vez de fallar.
+
+  /** Deja la página lista con la compra en curso y el reloj adelantado. */
+  function comprarYEsperar(milisegundos: number) {
+    renderCheckout();
+    act(() => {
+      fireEvent.click(getConfirmButton());
+    });
+    act(() => {
+      vi.advanceTimersByTime(milisegundos);
+    });
+  }
+
+  it("avisa cuando la escritura no responde, sin tratarlo como un error", () => {
+    vi.useFakeTimers();
+    // La promesa nunca se resuelve: es exactamente lo que hace Firestore sin
+    // conexión. setDoc() NO rechaza — encola la escritura y deja la promesa
+    // pendiente. Se comprobó en el navegador que sin este aviso el botón queda
+    // en "Confirmando compra..." indefinidamente, sin ninguna señal.
+    vi.mocked(createOrderFromCart).mockReturnValue(new Promise<string>(() => {}));
+
+    comprarYEsperar(9000);
+
+    const aviso = screen.getByText(/tardando más de lo normal/i);
+    // role="status" y no "alert": la compra sigue en curso, no falló.
+    expect(aviso.closest('[role="status"]')).not.toBeNull();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("no se adelanta: una red apenas lenta no dispara el aviso", () => {
+    vi.useFakeTimers();
+    vi.mocked(createOrderFromCart).mockReturnValue(new Promise<string>(() => {}));
+
+    comprarYEsperar(7000);
+
+    expect(screen.queryByText(/tardando más de lo normal/i)).not.toBeInTheDocument();
+  });
+
+  it("le dice a la persona lo único que NO tiene que hacer", () => {
+    vi.useFakeTimers();
+    vi.mocked(createOrderFromCart).mockReturnValue(new Promise<string>(() => {}));
+
+    comprarYEsperar(9000);
+
+    // La advertencia no es decorativa: el proyecto usa la caché EN MEMORIA de
+    // Firestore, así que la escritura encolada se pierde al cerrar o recargar la
+    // pestaña. Prometer que "se registra igual" sin aclararlo sería mentir.
+    expect(screen.getByText(/no cierres ni recargues esta pestaña/i)).toBeInTheDocument();
+  });
+
+  it("cancela el aviso cuando la compra termina a tiempo", async () => {
+    vi.useFakeTimers();
+    vi.mocked(createOrderFromCart).mockResolvedValue("orden-rapida");
+
+    renderCheckout();
+    await act(async () => {
+      fireEvent.click(getConfirmButton());
+    });
+    act(() => {
+      vi.advanceTimersByTime(30000);
+    });
+
+    // Si el temporizador no se cancelara, el aviso aparecería encima de la
+    // confirmación de una compra que ya salió bien.
+    expect(screen.queryByText(/tardando más de lo normal/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/gracias por tu compra/i)).toBeInTheDocument();
+  });
+});
+
+describe("CheckoutPage — el mensaje de permisos apunta al carrito", () => {
+  it("ante un rechazo de permisos, manda a revisar el carrito y no la sesión", async () => {
+    const user = userEvent.setup();
+    vi.mocked(createOrderFromCart).mockRejectedValue(
+      new OrderError(
+        ORDER_ERROR_CODES.PERMISSION_DENIED,
+        // El mensaje genérico del service, el mismo que ve el resto de la app.
+        "No pudimos completar la operación. Revisá que tu sesión siga activa y volvé a intentarlo.",
+      ),
+    );
+    renderCheckout();
+
+    await user.click(getConfirmButton());
+    const alerta = await screen.findByRole("alert");
+
+    // Las reglas comparan el precio de cada ítem contra el catálogo, así que la
+    // causa más probable de un rechazo AL COMPRAR es que un administrador cambió
+    // un precio que ya estaba en el carrito. Mandar a iniciar sesión de nuevo
+    // sería un callejón sin salida: la persona saldría, volvería a entrar,
+    // reintentaría y fallaría igual.
+    expect(alerta).toHaveTextContent(/volvé al carrito/i);
+    expect(alerta).not.toHaveTextContent(/sesión siga activa/i);
+  });
+
+  it("no toca los mensajes de los demás errores", async () => {
+    const user = userEvent.setup();
+    vi.mocked(createOrderFromCart).mockRejectedValue(
+      new OrderError(ORDER_ERROR_CODES.NETWORK_ERROR, "No pudimos conectarnos con el servidor.", {
+        retryable: true,
+      }),
+    );
+    renderCheckout();
+
+    await user.click(getConfirmButton());
+
+    // Solo PERMISSION_DENIED se traduce: el resto conserva el texto del service.
+    expect(await screen.findByRole("alert")).toHaveTextContent(/no pudimos conectarnos/i);
   });
 });
