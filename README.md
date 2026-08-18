@@ -65,7 +65,7 @@ Esto **recupera** la protección que tenía el proyecto anterior con una subcole
 
 **Efecto secundario aceptado:** si un administrador cambia el precio de un producto, los carritos que ya lo tenían dejan de poder confirmarse. Es el costo de verificar contra el catálogo, y el checkout lo maneja con un mensaje de error.
 
-**Lo que sigue sin poder verificarse:** la comparación del total lleva una tolerancia de un centavo, porque el cliente redondea cada línea a dos decimales y las reglas no tienen función de redondeo. No habilita ningún abuso: cada precio ya está verificado.
+**Lo que sigue sin poder verificarse:** la comparación del total lleva una tolerancia de un centavo, porque el cliente redondea cada línea a dos decimales y las reglas no tienen función de redondeo. No habilita ningún abuso —cada precio ya está verificado— y el motivo completo está en [Limitaciones conocidas](#limitaciones-conocidas).
 
 ## Qué incluye
 
@@ -213,6 +213,13 @@ Una excepción deliberada: `orderConverter.test.ts` **no** mockea `firebase/fire
 - **Los listados omiten los documentos que no superan la validación**, en vez de romperse. Con las reglas actuales no debería existir ninguno, pero la defensa se mantiene: si alguna vez se relajaran, un solo documento inválido dejaría el historial y el panel inutilizables de forma permanente, porque las órdenes tampoco se pueden borrar. La lectura de *una* orden puntual sigue siendo estricta y falla de forma visible: ahí un `null` se leería como "no existe" y ocultaría el problema.
 - **6 vulnerabilidades `moderate` sin resolver**, todas con la misma raíz: `uuid < 11.1.1`, que llega de forma transitiva a través de `firebase-admin`. Es una **devDependency** usada solo por `npm run seed`, así que nunca entra al bundle. No se aplica `npm audit fix --force` porque **degradaría** `firebase-admin` de `^14.2.0` a `10.3.0` — cuatro versiones mayores hacia atrás, con sus propios agujeros sin parchear, para tapar uno que no es alcanzable desde este código.
 - **Sin paginación en el panel de administración.** Con muchas órdenes, el listado global las trae todas. Fuera del alcance de esta homework.
+- **El dinero se guarda como decimal, no como entero en centavos.** Es la decisión que un sistema de pagos serio tomaría al revés, y conviene saber por qué quedó así.
+
+  Los números decimales no se pueden representar exactamente en binario: `10.55` se guarda como `10.550000000000000711`. El cliente redondea cada línea antes de sumar (para que el total coincida con lo que muestra en pantalla) y el lenguaje de las reglas **no tiene función de redondeo**, así que con una comparación exacta ambos lados divergen. Medido sobre 200.000 órdenes simuladas con precios de dos decimales, **el 24,6% sería rechazado** por diferencias del orden de `1e-13`. De ahí la tolerancia de un centavo en `firestore.rules`, que es la solución estándar y no habilita ningún abuso: cada precio ya está verificado contra el catálogo.
+
+  Hoy el problema **no está activo** —el catálogo usa precios enteros— pero es latente: basta cargar un producto con centavos desde el panel. El arreglo de fondo es guardar los importes como enteros en centavos (`$ 10,55` → `1055`), que es lo que hacen Stripe y MercadoPago.
+
+  No se hizo porque **la representación del dinero es una decisión de schema**: barata el primer día, cara después. Tocaría 29 archivos de producción y 270 aserciones de test, y sobre todo exigiría **reescribir órdenes ya guardadas** — registros históricos que las reglas protegen a propósito, y que son justamente lo que el diseño de snapshot existe para no tocar. En un sistema real se migraría con un campo nuevo conviviendo con el viejo, no con una conversión.
 
 ## Deploy
 
