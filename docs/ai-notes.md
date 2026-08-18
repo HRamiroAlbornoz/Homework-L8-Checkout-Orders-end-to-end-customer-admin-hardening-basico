@@ -2,7 +2,7 @@
 
 Este documento deja evidencia de cómo se usó IA (Claude) durante el desarrollo: los cuatro prompts obligatorios del enunciado, un resumen de las respuestas, y **qué se aceptó, qué se rechazó y cómo se verificó cada cosa**.
 
-La IA se usó como **auditora**, no como generadora de la solución completa. La diferencia se nota sobre todo en la última sección, donde se registran las veces que la IA se equivocó y cómo se detectó — porque una respuesta aceptada sin verificar no es una auditoría, es un acto de fe.
+La IA se usó como **auditora**, no como generadora de la solución completa. La diferencia se nota sobre todo en las secciones finales: las tres rondas de auditoría que corrió el proyecto —revisión de código, revisión de seguridad y un recorrido completo en el navegador— y el registro de las veces que la IA se equivocó. Una respuesta aceptada sin verificar no es una auditoría, es un acto de fe.
 
 ---
 
@@ -321,6 +321,52 @@ Las reglas de lectura y actualización, la paridad de la máquina de estados ent
 Antes de correr la revisión se anticipó que marcaría el `.env` con contraseñas de prueba, el `console.error`, y algo del flujo heredado de S3. **No marcó nada de eso.** Encontró un solo problema, más grave que todos los que se habían previsto, y en el único lugar donde se creía haber tomado una decisión informada.
 
 Es la segunda vez en este proyecto que la predicción sobre qué encontraría una revisión resulta equivocada. La conclusión práctica: anticipar los hallazgos sirve para prepararse, nunca para filtrarlos.
+
+---
+
+## Tercera auditoría: recorrer la app de punta a punta
+
+Con el código ya congelado y las dos revisiones anteriores cerradas, se recorrió la aplicación entera en el navegador. Encontró **cuatro cosas**, y una de ellas es la más instructiva del proyecto: **la causó el arreglo de la auditoría anterior**.
+
+### El hallazgo que se causó solo
+
+El commit de seguridad restauró la verificación del precio contra el catálogo. Eso volvió a hacer posible un rechazo que había dejado de existir: **el precio de un producto cambia mientras está en el carrito de alguien**.
+
+El mensaje de error decía *"volvé a iniciar sesión"*. Se había escrito en una etapa intermedia, cuando la verificación no existía y la única causa plausible era la sesión. Al restaurar la regla se actualizaron el README, la guía de arquitectura, estas notas y el modelo de dominio — **pero no los mensajes ni los comentarios**.
+
+El resultado era un callejón sin salida: la persona cerraba sesión, volvía a entrar, reintentaba y fallaba igual, para siempre.
+
+La sonda que lo destapó fue cambiar el precio de un producto por detrás con el SDK de Admin y comprar con un carrito desactualizado. Y la verificación del arreglo fue la parte que importa: se restauró el precio y se apretó **el mismo botón sin tocar nada más**, y la compra salió. Eso prueba que el consejo nuevo (*"volvé al carrito, revisalo"*) destraba el problema de verdad, cosa que el anterior no podía hacer.
+
+Un segundo comentario, en `orderConverter.ts`, tenía **tres afirmaciones falsas** por la misma causa: que las reglas no podían validar los ítems, que un documento con `items: [1,2,3]` era aceptado, y que el tope era de 50 en lugar de 10. El código estaba bien; la explicación mentía.
+
+**La lección práctica:** documentar a fondo el *porqué* de cada decisión tiene un costo que no se ve hasta que una decisión se revierte — **hay más lugares que quedan mintiendo**, y a un comentario detallado se le cree más que a uno vago. Revertir una decisión de fondo exige un `grep` de los términos de la decisión vieja antes de darla por cerrada.
+
+### Los otros tres
+
+**El checkout se colgaba para siempre sin conexión.** `setDoc()` **no rechaza** offline: Firestore encola la escritura localmente y deja la promesa pendiente. Se comprobó con 45 segundos sin red — botón congelado en *"Confirmando compra..."*, sin error, sin salida.
+
+Eso invalidó un supuesto del propio código: `NETWORK_ERROR` con `retryable: true` se había diseñado para este caso y **nunca se dispara en un corte de red real**.
+
+La corrección no cancela la escritura, porque va a completarse sola: a los 8 segundos aparece un aviso —`role="status"`, no `alert`, porque la compra sigue en curso— que advierte **no cerrar la pestaña**. Esa advertencia salió de investigar antes de escribirla: el proyecto usa la caché **en memoria** de Firestore, así que la escritura encolada se pierde al recargar. Prometer que "se registra igual" habría sido mentir.
+
+**Dos encabezados `h2` hermanos** en el panel de administración, diciendo casi lo mismo. Regresión introducida al agregar la ruta-layout.
+
+**El botón "−" del carrito eliminaba el producto** al pulsarlo con una sola unidad, sin aviso — mientras que vaciar el carrito sí pedía confirmación. Dos acciones destructivas con criterios opuestos. Ahora se deshabilita en 1, igual que el "+" en el tope; eliminar sigue disponible en el botón que dice lo que hace.
+
+### Un falso positivo que enseña
+
+`documentElement.scrollWidth` daba 751 en un viewport de 320, aparentando scroll horizontal. Intentar scrollear de verdad dejó `scrollX` en **0**: el contenedor de la tabla contenía el desborde correctamente. La métrica mentía; la prueba directa, no.
+
+Es la misma lección que la contraprueba de los secretos, en otro disfraz: **medir algo cercano al problema no es medir el problema**.
+
+### Por qué esta ronda encontró lo que 531 tests no
+
+Los cuatro hallazgos comparten una característica: **ninguno era observable desde un test**.
+
+Los tests mockean el service, así que un `setDoc` que nunca resuelve no era un escenario que se hubiera imaginado. La jerarquía de encabezados no la mira ningún test. El botón "−" tenía un test que afirmaba el comportamiento viejo — pasaba en verde **codificando el problema**. Y el mensaje obsoleto era correcto en su propio test unitario: lo que estaba mal era su relación con una regla que vive en otro archivo y se despliega aparte.
+
+**Los tests verifican lo que a uno se le ocurrió verificar. El navegador muestra lo que no.**
 
 ---
 
