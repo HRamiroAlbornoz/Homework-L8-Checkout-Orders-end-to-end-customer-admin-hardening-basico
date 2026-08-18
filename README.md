@@ -6,7 +6,7 @@ Construido sobre la base del proyecto anterior ([L7 — Release Candidate del E-
 
 | | |
 |---|---|
-| Tests | 526 en 28 archivos |
+| Tests | 531 en 28 archivos |
 | Pruebas de reglas | 28 contra Firestore real ([resultado](docs/verificacion-reglas.txt)) |
 | CI | Lint, type-check, tests y build en cada push y PR |
 | Decisiones y uso de IA | [`docs/ai-notes.md`](docs/ai-notes.md) |
@@ -76,6 +76,14 @@ Esto **recupera** la protección que tenía el proyecto anterior con una subcole
 **Panel de administración** — listado global, filtro por estado resuelto **en Firestore** (no en memoria), y cambio de estado con confirmación que nombra la orden y los dos estados involucrados. Solo se ofrecen las transiciones válidas.
 
 **Errores diferenciados** — `{ code, message, retryable }` con códigos propios para índice faltante, permisos, red y desconocido. Un índice faltante se marca como **no reintentable**: tarda un par de minutos en construirse, así que reintentar de inmediato produciría el mismo error en bucle.
+
+**Sin conexión, el checkout avisa en vez de colgarse** — y esto merece una explicación, porque contradice lo que uno esperaría.
+
+`setDoc()` **no rechaza** cuando no hay red: Firestore encola la escritura localmente y deja la promesa pendiente hasta que la conexión vuelva. Verificado en el navegador: sin nada que lo maneje, el botón se queda en *"Confirmando compra..."* **indefinidamente** —se probaron 45 segundos— sin error, sin salida y sin ninguna señal.
+
+Como consecuencia, el código `NETWORK_ERROR` con `retryable: true` **casi nunca se dispara en un corte de red real**: está pensado para fallos que el servidor sí rechaza.
+
+A los 8 segundos sin respuesta aparece un aviso —`role="status"`, no `alert`, porque la compra sigue en curso y probablemente termine bien— que explica qué pasa y advierte **no cerrar ni recargar la pestaña**. Esa advertencia no es un formalismo: el proyecto usa la caché **en memoria** de Firestore, así que la escritura encolada se pierde si la pestaña se cierra.
 
 ## Setup local
 
@@ -207,12 +215,26 @@ Una excepción deliberada: `orderConverter.test.ts` **no** mockea `firebase/fire
 - **Precio de las órdenes** — cada línea se compara contra el precio del catálogo dentro de las reglas, y el total contra la suma de las líneas. Manipular el `localStorage` para comprar más barato no funciona.
 - **Mensajes que no filtran información** — pedir una orden inexistente y pedir una ajena dan el **mismo** error. Distinguirlos permitiría probar ids al azar para averiguar cuáles corresponden a órdenes reales.
 
+
+## Verificación manual de los flujos
+
+Además de la suite automatizada, se recorrió la aplicación entera en el navegador con Chrome DevTools: guards de navegación, registro y login, catálogo con búsqueda y paginación, carrito, checkout, historial, detalle, panel de administración, alta de productos, teclado y foco, tema claro, 320px de ancho y consola.
+
+Esa ronda encontró **tres cosas que los tests no veían**, y el patrón vale la pena: los tests verifican lo que a uno se le ocurrió verificar; el navegador muestra lo que no.
+
+1. **El checkout se colgaba para siempre sin conexión** (explicado más arriba). Ningún test lo detectaba porque todos mockean el service, y un mock que nunca resuelve no era un caso que se hubiera pensado.
+2. **Dos encabezados `h2` hermanos** en el panel de administración diciendo casi lo mismo, que ensuciaban la navegación por encabezados de un lector de pantalla.
+3. **El botón "−" del carrito eliminaba el producto** al pulsarlo con una sola unidad, sin avisar — mientras que vaciar el carrito sí pedía confirmación. Dos acciones destructivas con criterios opuestos.
+
+También apareció un **falso positivo instructivo**: `documentElement.scrollWidth` daba 751 en un viewport de 320, aparentando scroll horizontal. Intentar scrollear de verdad dejó `scrollX` en 0 — el contenedor de la tabla contenía el desborde correctamente. La métrica mentía; la prueba real, no.
+
 ## Limitaciones conocidas
 
 - **Un máximo de 10 productos distintos por orden.** Es el techo de `get()` de las reglas, no una decisión de producto. Un carrito con más de 10 líneas no se puede confirmar; el checkout lo detecta antes y lo explica. Subirlo exigiría mover la creación de órdenes a un camino de servidor.
 - **Los listados omiten los documentos que no superan la validación**, en vez de romperse. Con las reglas actuales no debería existir ninguno, pero la defensa se mantiene: si alguna vez se relajaran, un solo documento inválido dejaría el historial y el panel inutilizables de forma permanente, porque las órdenes tampoco se pueden borrar. La lectura de *una* orden puntual sigue siendo estricta y falla de forma visible: ahí un `null` se leería como "no existe" y ocultaría el problema.
 - **6 vulnerabilidades `moderate` sin resolver**, todas con la misma raíz: `uuid < 11.1.1`, que llega de forma transitiva a través de `firebase-admin`. Es una **devDependency** usada solo por `npm run seed`, así que nunca entra al bundle. No se aplica `npm audit fix --force` porque **degradaría** `firebase-admin` de `^14.2.0` a `10.3.0` — cuatro versiones mayores hacia atrás, con sus propios agujeros sin parchear, para tapar uno que no es alcanzable desde este código.
 - **Sin paginación en el panel de administración.** Con muchas órdenes, el listado global las trae todas. Fuera del alcance de esta homework.
+- **La compra encolada sin conexión se pierde al cerrar la pestaña.** Firestore usa caché **en memoria** (`getFirestore(app)` sin persistencia), así que una escritura que quedó esperando red no sobrevive a cerrar o recargar. Por eso el aviso de demora lo dice explícitamente en vez de prometer que se registrará igual. Activar `persistentLocalCache` lo resolvería, a cambio de una decisión que hay que tomar a conciencia: los datos del usuario quedarían escritos en IndexedDB, lo que en una computadora compartida es una consideración de privacidad, no solo técnica.
 - **El dinero se guarda como decimal, no como entero en centavos.** Es la decisión que un sistema de pagos serio tomaría al revés, y conviene saber por qué quedó así.
 
   Los números decimales no se pueden representar exactamente en binario: `10.55` se guarda como `10.550000000000000711`. El cliente redondea cada línea antes de sumar (para que el total coincida con lo que muestra en pantalla) y el lenguaje de las reglas **no tiene función de redondeo**, así que con una comparación exacta ambos lados divergen. Medido sobre 200.000 órdenes simuladas con precios de dos decimales, **el 24,6% sería rechazado** por diferencias del orden de `1e-13`. De ahí la tolerancia de un centavo en `firestore.rules`, que es la solución estándar y no habilita ningún abuso: cada precio ya está verificado contra el catálogo.
